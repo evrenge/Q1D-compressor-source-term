@@ -1,6 +1,6 @@
 # Quasi-1D Euler Solver with Turbomachinery Source Terms — Development Plan
 
-Status: **agreed, Phase 0 not started**
+Status: **Phase 0 complete, Phase 1 next**
 Last updated: 2026-07-25
 
 ---
@@ -261,14 +261,37 @@ what will bite when pushing toward the choke line.
 
 ## 5. Phases and gates
 
-### Phase 0 — Skeleton and baseline
+### Phase 0 — Skeleton and baseline ✅ **complete**
 
 - Package layout, `pyproject.toml`, `pytest`, `ruff`.
 - Both original scripts land in `legacy/`, **frozen and never edited**, so
-  every later result can be diffed against original behaviour.
+  every later result can be diffed against original behaviour. Provenance and
+  transcription verification in `legacy/README.md`.
 - Profile the legacy run; record baseline wall time and hot spots.
 
-**Gate:** a recorded baseline number to beat.
+**Gate met.** See `BASELINE.md`. Headline results:
+
+- **14.77 s / 10,915 steps / 1.35 ms per step**, flat per-step cost.
+- **The legacy solver works**: W = 21.492878 against the analytic 21.490743,
+  an error of +0.0099%. Several findings in the original review implied no
+  steady operating point was reachable; one is reachable and it is reached.
+- The far field is uniform to ~1e-8 on both sides of the disk, confirming that
+  the Phase 3 gate of 1e-8 is achievable rather than aspirational.
+- The 1e-4 error is traced quantitatively to the cell-52 lookup station lying
+  inside the smeared region (`pt` low by 3.4e-4 → ~0.3 N of force error out of
+  1731 N). This confirms §4.2 finding #2 and is removed by sampling upstream.
+- **Convergence-based stopping is worth 3.2x**, larger than every
+  micro-optimisation combined. `tend = 0.5` is ~3x longer than needed.
+
+Two corrections to earlier figures in this document, recorded rather than
+silently amended:
+
+- An initial baseline of 386 s was a harness artefact (capturing the script's
+  10,915 per-step `print` calls), not solver cost. True cost is 14.77 s.
+- The §3.4 microbenchmarks are correct as per-call costs but overstated the
+  share of runtime they represent. At the true step count they account for
+  ~0.7 s of 14.77 s, not the majority. Phase 2 priorities in `BASELINE.md` are
+  reordered accordingly.
 
 ### Phase 1 — 0D analytic reference
 
