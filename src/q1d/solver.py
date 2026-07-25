@@ -374,10 +374,11 @@ class Solver:
         """March until converged (``tol``), until ``t_end``, or out of steps.
 
         ``tol`` is on the residual norm *relative to its value at step zero*, so
-        it is independent of the problem's absolute scale.
+        it is independent of the problem's absolute scale. With neither ``tol``
+        nor ``t_end`` the run is exactly ``max_steps`` steps long.
         """
-        if tol is None and t_end is None:
-            raise ValueError("give at least one stopping criterion: tol or t_end")
+        # With neither `tol` nor `t_end`, the run is exactly `max_steps` long --
+        # which is what a hold test wants.
         if t_end is not None and self.config.local_time_stepping:
             raise ValueError(
                 "local_time_stepping advances each cell at its own rate, so the field "

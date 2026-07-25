@@ -77,6 +77,20 @@ def stretched_grid(n=80, ratio=1.03, area=skew_area):
 # ===========================================================================
 
 
+def _stagnant_flux_scales(grid):
+    """Natural flux scale of each equation for a stagnant duct at 1 atm.
+
+    Normalising all three by ``p*A`` (as an earlier version did) is wrong: the
+    energy flux scale is ~1e6 W while the momentum one is ~1e4 N, so a common
+    denominator makes a one-ulp energy residual look 100x worse than a one-ulp
+    momentum residual.
+    """
+    a = float(np.max(grid.a_face))
+    rho = 101325.0 / (GAS.R * 288.15)
+    c = GAS.speed_of_sound(288.15)
+    return np.array([rho * c * a, 101325.0 * a, 101325.0 / GAS.gm1 * c * a])
+
+
 def _stagnant_solver(order, area, bc):
     areas = {"constant": 0.1, "varying": bump_area, "skew": skew_area}
     grid = Grid.uniform(0.0, 1.0, 80, areas[area])
@@ -101,33 +115,58 @@ def test_stagnant_field_has_exactly_zero_residual(order, area):
     isolates the property of the *scheme*. Round-off contributed by the
     boundary conditions is measured separately below.
 
-    ``set_state`` derives ``p`` from ``cv`` rather than storing the argument,
-    so this measures the state an RK stage actually produces. An earlier
-    version stored ``p`` directly, leaving it 1 ulp inconsistent with ``cv``
-    and making this gate bitwise-zero on a state the time-stepper never visits.
+    The pressure field is forced bitwise uniform here, because that is the
+    hypothesis of the property. See the companion test below for what the
+    time-stepper actually realises, which is *not* bitwise zero when the area
+    varies — recovering ``p`` from ``cv`` is not an exact round trip, so
+    neighbouring cells differ by an ulp and the cancellation is only to
+    round-off. Conflating the two is how an earlier version of this test
+    claimed bitwise zero for a state the solver never visits.
     """
     solver, _ = _stagnant_solver(order, area, Transmissive())
     solver.cv[:, 0] = solver.cv[:, 1]
     solver.cv[:, -1] = solver.cv[:, -2]
-    solver.p[0], solver.p[-1] = solver.p[1], solver.p[-2]
+    solver.p[:] = solver.p[1]  # bitwise-uniform pressure: the hypothesis
 
     residual = solver.residual()
-    # The momentum equation is the one the geometric source acts on, and it
-    # is well-balanced *bitwise*.
     assert np.max(np.abs(residual[1])) == 0.0, (
         f"max |momentum residual| = {np.max(np.abs(residual[1])):.3e}"
     )
     # Mass and energy cannot be bitwise zero when the area varies: recovering
     # rho = (rho*A)/A is not an exact round trip, so the initial field itself
     # is non-uniform at the ulp level. They must sit at round-off.
-    # Mass and energy are bitwise zero on constant and bump areas, and 2.1e-16
-    # absolute on the skew area, where recovering rho = (rho0*A)/A is not an
-    # exact round trip so the Roe dissipation sees ulp-level non-uniformity.
-    # (An earlier version asserted "< 1e-14 * scale" -- 1e-10 absolute -- and
-    # attributed it to that round trip without ever measuring it. The bound was
-    # six orders loose and would not have caught a real defect.)
-    assert np.max(np.abs(residual[0])) < 1e-15
-    assert np.max(np.abs(residual[2])) < 1e-15
+    # Mass and energy are a *different* hypothesis: they involve the
+    # reconstructed density, and rho = (rho0*A)/A is not bitwise uniform for an
+    # arbitrary area law (2.1e-16 on the skew grid). Well-balancedness proper
+    # is the momentum statement above; these are held to round-off.
+    # (An earlier version asserted "< 1e-14 * scale" = 1e-10 absolute and
+    # attributed the slack to a round trip it never measured -- six orders
+    # loose, and unable to catch a real defect.)
+    scales = _stagnant_flux_scales(solver.grid)
+    assert np.max(np.abs(residual[0])) / scales[0] < 1e-14
+    assert np.max(np.abs(residual[2])) / scales[2] < 1e-14
+
+
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("area", ["constant", "varying", "skew"])
+def test_realised_stagnant_residual_is_round_off(order, area):
+    """What the time-stepper actually produces, as opposed to the ideal above.
+
+    ``set_state`` derives ``p`` from ``cv``, so with a varying area the
+    recovered pressure is not bitwise uniform and the geometric source cancels
+    the pressure flux only to round-off: 1.8e-12 N at order 1, 3.6e-12 at
+    order 2, against a ``p·A`` scale of ~1e4 N — about one ulp. Constant area
+    stays exactly zero because the round trip is exact there.
+    """
+    solver, grid = _stagnant_solver(order, area, Transmissive())
+    solver.cv[:, 0] = solver.cv[:, 1]
+    solver.cv[:, -1] = solver.cv[:, -2]
+    solver.p[0], solver.p[-1] = solver.p[1], solver.p[-2]
+
+    relative = np.max(np.abs(solver.residual()).max(axis=1) / _stagnant_flux_scales(grid))
+    assert relative < 1e-14, f"relative residual {relative:.3e}"
+    if area == "constant":
+        assert np.max(np.abs(solver.residual())) == 0.0
 
 
 @pytest.mark.parametrize("area", ["constant", "varying", "skew"])
@@ -147,8 +186,9 @@ def test_characteristic_boundaries_add_only_round_off_to_a_stagnant_field(area):
     # density non-uniformity already present. An earlier version asserted
     # "< 1e-13" while claiming "a few ulps" -- the number asserted was never
     # the number measured.
-    assert np.max(np.abs(solver.residual()[1])) == 0.0  # momentum, bitwise
-    assert np.max(np.abs(solver.residual())) < 1e-15
+    scales = _stagnant_flux_scales(solver.grid)
+    relative = np.max(np.abs(solver.residual()).max(axis=1) / scales)
+    assert relative < 1e-14, f"relative residual {relative:.3e}"
 
 
 def test_stagnant_field_stays_stagnant_under_time_marching():
@@ -464,7 +504,8 @@ def test_converged_solution_holds(monkeypatch):
     rho, u, _, _ = solver.primitives()
     W_converged = float(np.mean(rho[1:-1] * u[1:-1] * grid.a_cell[1:-1]))
 
-    hold = solver.run(max_steps=10 * converge.steps, t_end=1e9)
+    # No stopping criterion: run exactly 10x the steps convergence took.
+    hold = solver.run(max_steps=10 * converge.steps)
     rho, u, _, _ = solver.primitives()
     W_held = float(np.mean(rho[1:-1] * u[1:-1] * grid.a_cell[1:-1]))
 
