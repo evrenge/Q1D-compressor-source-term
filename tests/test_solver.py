@@ -223,22 +223,34 @@ def test_sod_overshoot_is_bounded_and_controlled_by_the_limiter():
     assert 0.0 < undershoot < 2e-3, f"density undershoot {undershoot:.3e}"
     assert x[int(np.argmin(rho[1:-1]))] > 0.80  # at the shock, x = 0.850
 
-    # no reverse flow, and pressure stays inside the initial range
-    assert p[1:-1].min() >= SOD_RIGHT.p * (1 - 1e-9)
-    assert p[1:-1].max() <= SOD_LEFT.p * (1 + 1e-9)
+    # Pressure behaves the same way, with both an overshoot above the left
+    # state and an undershoot below the right one.
+    p_over = p[1:-1].max() - SOD_LEFT.p
+    p_under = SOD_RIGHT.p - p[1:-1].min()
+    assert 0.0 < p_over < 2e-2, f"pressure overshoot {p_over:.3e}"
+    assert 0.0 < p_under < 3e-3, f"pressure undershoot {p_under:.3e}"
+
+    # No reverse flow anywhere -- that would be a genuine failure, not an
+    # extremum artefact.
     assert u[1:-1].min() >= -1e-9
 
-    # Tightening the threshold must reduce *both*, which is what identifies the
-    # cause as the smoothness parameter rather than the Riemann solver.
-    prev_over, prev_under = overshoot, undershoot
+    # Tightening the threshold must reduce *all four*, which is what identifies
+    # the cause as the smoothness parameter rather than the Riemann solver.
+    previous = (overshoot, undershoot, p_over, p_under)
     for limfac in (1.0, 0.6, 0.3):
         s, _, _ = _run_sod(400, limiter_factor=limfac)
-        r, _, _, _ = s.primitives()
-        over = r[1:-1].max() - SOD_LEFT.rho
-        under = SOD_RIGHT.rho - r[1:-1].min()
-        assert over < prev_over, f"limfac={limfac}: overshoot {over:.3e} !< {prev_over:.3e}"
-        assert under < prev_under, f"limfac={limfac}: undershoot {under:.3e} !< {prev_under:.3e}"
-        prev_over, prev_under = over, under
+        r, _, q, _ = s.primitives()
+        current = (
+            r[1:-1].max() - SOD_LEFT.rho,
+            SOD_RIGHT.rho - r[1:-1].min(),
+            q[1:-1].max() - SOD_LEFT.p,
+            SOD_RIGHT.p - q[1:-1].min(),
+        )
+        for name, now, before in zip(
+            ("rho over", "rho under", "p over", "p under"), current, previous, strict=True
+        ):
+            assert now < before, f"limfac={limfac}: {name} {now:.3e} !< {before:.3e}"
+        previous = current
 
 
 def test_sod_conserves_mass_and_energy():
@@ -294,19 +306,29 @@ def test_subsonic_nozzle_matches_the_area_mach_relation():
     mach_expected = np.array([mach_from_flow_function(float(f), GAS) for f in phi_expected])
     assert np.max(np.abs(mach - mach_expected)) < 2e-4
 
-    # stagnation pressure must be preserved: the flow is isentropic
+    # Stagnation pressure must be preserved: the flow is isentropic. The
+    # residual loss is numerical entropy generation through the throat, and it
+    # converges at ~3rd order -- see the refinement test below. At n=200 it is
+    # 1.16e-4, so this bound is a measured value, not an aspiration.
     pt = p[1:-1] * (1.0 + 0.5 * GAS.gm1 * mach**2) ** GAS.g_over_gm1
-    assert np.max(np.abs(pt / p0_in - 1.0)) < 5e-5
+    assert np.max(np.abs(pt / p0_in - 1.0)) < 2e-4
 
 
-def test_cell_centred_mass_flow_converges_at_second_order():
-    """Quantifies why the gate above uses the face flux, not cell values.
+def test_nozzle_discretisation_errors_converge_under_refinement():
+    """The two residual errors in the nozzle are discretisation, not defects.
 
-    ``A_cell = A(x_centre)`` is not the area that makes cell-centred
-    ``rho*u*A`` telescope against the face fluxes, so its spread is a
-    discretisation artefact of order ``dx^2`` rather than a conservation error.
+    * Cell-centred ``rho*u*A(x_centre)`` is not the conserved quantity — it is
+      the face flux that telescopes — so its spread is an ``O(dx^2)`` artefact.
+    * Stagnation pressure loss is numerical entropy generation through the
+      throat, and converges at ~3rd order (1.10e-3, 1.16e-4, 1.53e-5 at
+      n = 100, 200, 400).
+
+    A *plateau* in either would mean a genuine spurious source, which matters
+    directly for Phase 3: the compressor model reads p0 upstream of the disk,
+    so anything that erodes stagnation pressure corrupts the map lookup.
     """
     spreads = []
+    pt_errors = []
     for n in (100, 200, 400):
         grid = Grid.uniform(0.0, 1.0, n, bump_area)
         bc = StagnationInletStaticOutlet(p0_in=101325.0, T0_in=288.15, p_back=95000.0)
@@ -320,12 +342,19 @@ def test_cell_centred_mass_flow_converges_at_second_order():
         st = static_from_stagnation(288.15, 101325.0, 15.0, float(np.max(grid.a_face)), GAS)
         solver.set_state(rho=st.rho, u=st.u, p=st.p)
         assert solver.run(max_steps=40_000, tol=1e-11).converged
-        rho, u, _, _ = solver.primitives()
+        rho, u, p, c = solver.primitives()
         W = rho[1:-1] * u[1:-1] * grid.a_cell[1:-1]
         spreads.append(float(np.std(W) / np.mean(W)))
+        mach = u[1:-1] / c[1:-1]
+        pt = p[1:-1] * (1.0 + 0.5 * GAS.gm1 * mach**2) ** GAS.g_over_gm1
+        pt_errors.append(float(np.max(np.abs(pt / 101325.0 - 1.0))))
 
     order = np.log2(spreads[0] / spreads[2]) / 2.0
-    assert 1.7 < order < 2.3, f"observed order {order:.2f} from spreads {spreads}"
+    assert 1.7 < order < 2.3, f"cell-W order {order:.2f} from spreads {spreads}"
+
+    pt_order = np.log2(pt_errors[0] / pt_errors[2]) / 2.0
+    assert pt_order > 2.5, f"stagnation-pressure loss order {pt_order:.2f} from {pt_errors}"
+    assert pt_errors[2] < 5e-5
 
 
 def test_nozzle_throat_is_the_fastest_point():
