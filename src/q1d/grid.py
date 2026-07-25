@@ -54,6 +54,15 @@ class Grid:
             raise ValueError("grid spacing must be strictly positive")
         if np.any(self.a_face <= 0.0):
             raise ValueError("face areas must be strictly positive")
+        if np.any(self.a_cell <= 0.0):
+            raise ValueError("cell areas must be strictly positive")
+        if np.any(self.vol <= 0.0):
+            raise ValueError("cell volumes must be strictly positive")
+        expected_da = self.a_face[1:] - self.a_face[:-1]
+        if not np.allclose(self.da, expected_da, rtol=0.0, atol=0.0):
+            raise ValueError("da must equal a_face[1:] - a_face[:-1]")
+        if not np.allclose(self.dx, self.x_face[1:] - self.x_face[:-1], rtol=0.0, atol=0.0):
+            raise ValueError("dx must equal the spacing of x_face")
 
     @property
     def n_interior(self) -> int:

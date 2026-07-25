@@ -128,6 +128,13 @@ class StagnationInletStaticOutlet:
                 pb = self.p_static_in
                 Tb = self.T0_in * (pb / self.p0_in) ** gas.gm1_over_g
                 ub = math.sqrt(max(0.0, 2.0 * gas.cp * (self.T0_in - Tb)))
+                cb = math.sqrt(gas.gamma * gas.R * Tb)
+                if ub < cb:
+                    raise ValueError(
+                        f"p_static_in={pb!r} with p0_in={self.p0_in!r} imposes M={ub / cb:.3f} "
+                        "on a boundary classified as supersonic inflow; the imposed triple "
+                        "must itself be supersonic"
+                    )
                 return GhostState(pb / (gas.R * Tb), ub, pb)
             return self._subsonic_inflow(u - 2.0 * c / gas.gm1, self.p0_in, self.T0_in, +1.0, gas)
         if -u < c:  # subsonic outflow through the inlet (reverse flow)

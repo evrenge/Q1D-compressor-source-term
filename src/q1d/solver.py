@@ -42,7 +42,8 @@ __all__ = [
     "RunResult",
     "Solver",
     "NonPhysicalState",
-    "CFL_STABILITY_LIMIT",
+    "CFL_STABILITY_LIMIT_ORDER1",
+    "CFL_STABILITY_LIMIT_ORDER2",
 ]
 
 #: Jameson-style 5-stage low-storage coefficients, as used by the legacy code.
@@ -91,12 +92,20 @@ class ReferenceState:
                 raise ValueError(f"reference {name} must be positive, got {getattr(self, name)!r}")
 
 
-#: Measured stability limit for this scheme: CFL 2.44 is stable and 2.46 is
-#: not, on a stagnant varying-area duct whose residual starts at bitwise zero
-#: (so any growth is pure amplification). The legacy default of 2.5 is *past*
-#: the limit -- see `RK5` above for why the tuned value does not apply here.
-#: `tests/test_solver.py::test_measured_cfl_stability_limit` pins this.
-CFL_STABILITY_LIMIT = 2.45
+#: Conservative stability bound for **order 2**. The limit is not a single
+#: number: measured on a stagnant varying-area duct whose residual starts at
+#: bitwise zero (so growth is pure amplification), it *falls with mesh
+#: refinement* -- 2.475 at n=40, 2.452 at n=80, 2.440 at n=160, 2.435 at n=320
+#: -- and a short probe hides it, since CFL 2.44 looks stable at n=160 for 400
+#: steps and diverges by 5000. Order 1 is far more forgiving at ~3.13.
+#:
+#: An earlier constant of 2.45 was measured at (n=80, 400 steps) and presented
+#: as a property of the scheme. It is not; treat this as an upper bound that
+#: still needs margin, not a usable CFL.
+CFL_STABILITY_LIMIT_ORDER2 = 2.43
+
+#: Order-1 reconstruction is stable to roughly this, measured the same way.
+CFL_STABILITY_LIMIT_ORDER1 = 3.12
 
 
 @dataclass(frozen=True)
@@ -189,7 +198,18 @@ class Solver:
         self.cv[0, 1:-1] = rho * a
         self.cv[1, 1:-1] = rho * u * a
         self.cv[2, 1:-1] = (p / self.gas.gm1 + 0.5 * rho * u * u) * a
-        self.p[1:-1] = p
+        # Derive p from cv rather than storing the argument, so the state is
+        # exactly what an RK stage would produce. Storing p directly left it
+        # 1 ulp inconsistent with cv, which made the well-balancedness gate
+        # measure a state the time-stepper never visits.
+        #
+        # Interior only: the ghost cells are still empty at this point, so the
+        # whole-array `_update_pressure` would divide by a zero ghost density.
+        # `_sync_boundaries` fills them from the interior immediately after.
+        cv = self.cv
+        self.p[1:-1] = (
+            self.gas.gm1 / a * (cv[2, 1:-1] - 0.5 * cv[1, 1:-1] * cv[1, 1:-1] / cv[0, 1:-1])
+        )
         self._sync_boundaries()
 
     def primitives(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -349,7 +369,7 @@ class Solver:
         max_steps: int = 100_000,
         tol: float | None = None,
         t_end: float | None = None,
-        record_every: int = 1,
+        record_every: int = 10,
     ) -> RunResult:
         """March until converged (``tol``), until ``t_end``, or out of steps.
 
@@ -358,12 +378,32 @@ class Solver:
         """
         if tol is None and t_end is None:
             raise ValueError("give at least one stopping criterion: tol or t_end")
+        if t_end is not None and self.config.local_time_stepping:
+            raise ValueError(
+                "local_time_stepping advances each cell at its own rate, so the field "
+                "is not a solution at any single time and t_end is meaningless. Use it "
+                "with tol for steady problems, or switch to global stepping."
+            )
+        if record_every < 1:
+            raise ValueError(f"record_every must be >= 1, got {record_every!r}")
 
         start = time.perf_counter()
         residuals: list[np.ndarray] = []
         times: list[float] = []
         r0 = self.residual_norm()
-        r0 = np.where(r0 > 0.0, r0, 1.0)
+        if tol is not None and not np.any(r0 > 0.0):
+            # Every equation is already at bitwise zero -- a stagnant duct, say.
+            # Normalising by 1.0 here would silently turn a relative tolerance
+            # into an absolute one in SI units, which no run can then satisfy.
+            return RunResult(
+                steps=0,
+                t=self.t,
+                converged=True,
+                wall_time=time.perf_counter() - start,
+                residual_history=np.array([r0]),
+                time_history=np.array([self.t]),
+            )
+        r0 = np.where(r0 > 0.0, r0, np.max(r0))
 
         converged = False
         step = 0
@@ -379,7 +419,7 @@ class Solver:
             self.t += float(np.min(dt))
             step += 1
 
-            if step % record_every == 0 or step == 1:
+            if step % record_every == 0 or step == 1:  # residual_norm is ~27% of a step
                 r = self.residual_norm()
                 residuals.append(r)
                 times.append(self.t)
@@ -392,6 +432,6 @@ class Solver:
             t=self.t,
             converged=converged,
             wall_time=time.perf_counter() - start,
-            residual_history=np.array(residuals) if residuals else np.zeros((0, 3)),
-            time_history=np.array(times),
+            residual_history=np.array(residuals) if residuals else np.array([r0]),
+            time_history=np.array(times) if times else np.array([self.t]),
         )

@@ -113,50 +113,72 @@ per-call costs and wrong as a share of runtime.
 
 # Phase 2 result — the rewrite measured against this baseline
 
-Measured 2026-07-25, same problem: 99 interior cells, `A = 0.1 m²`, order 2,
-5-stage RK, `entropy_fix = 0.05`.
+**This section was rewritten on 2026-07-25 after a Phase 2 audit showed the
+first version was wrong in three ways.** The original claimed 2.6x with a
+per-step gain of 1.19x and an attribution table that double-counted CFL. What
+follows is the corrected measurement, with the errors kept visible.
 
-| metric | legacy | rewrite | ratio |
-| --- | --- | --- | --- |
-| per-step cost | 1.350 ms | **1.136 ms** | 1.19x |
-| steps to solution | 10,915 (fixed `tend`) | 4,204 (residual 1e-10, CFL 2.4) | 2.6x |
-| **end-to-end** | **14.77 s** | **5.76 s** | **2.6x** |
+## Per-step cost
 
-`W = 12.023045 kg/s` is identical across CFL 2.0/2.4 and global/local time
-stepping, so none of this changed the answer.
-
-## The prediction was wrong, and by how much
-
-`PLAN.md` Phase 2 estimated 5–10x from numpy vectorisation. We got **2.6x**,
-and essentially none of it came from where the plan said it would.
-
-**Vectorising `entropy_corr` and `interp1d` bought nothing measurable.** The
-first version of the rewrite — with both replaced — ran at **1.349 ms/step**
-against the legacy 1.350 ms. The savings were traded away against overhead
-added elsewhere: `primitives()` allocations, per-variable loops in
-reconstruction, `np.array([...])` construction in the flux, and dataclass
-construction in the boundary conditions.
-
-This was foreseeable. `BASELINE.md` already recorded that those microbenchmarks
-were "correct as per-call costs and wrong as a share of runtime" — they account
-for ~0.7 s of 14.77 s. Predicting a 5–10x speedup from them was the same error
-made twice.
-
-## Where the 2.6x actually comes from
-
-| change | contribution |
+| variant | ms/step |
 | --- | --- |
-| Convergence-based stopping (4,204 steps vs 10,915) | 2.2x |
-| Stacked array ops: 6 `_van_albada` calls/stage → 2, 3 Harten calls → 1, cheaper positivity guard | 1.19x |
-| CFL 2.4 instead of 2.0 | 1.17x |
+| legacy baseline (includes its source lookup) | 1.350 |
+| rewrite, `advance()` alone | 1.211 |
+| rewrite, `advance()` + `residual_norm()` every step | 1.472 |
+| rewrite, as `run(record_every=10)` actually pays | **1.237** |
 
-Profiling the rewrite shows no remaining hot spot — `_roe_flux` 22%,
-`_van_albada` 19%, `_reconstruct` 10%, `_harten_entropy_fix` 8.5%, the rest
-spread thin. That is the signature of numpy per-call overhead at ~100 cells
-dominating the arithmetic, which is exactly the regime where D3 (no Numba)
-costs us. Further gains need either fewer numpy calls per stage or a JIT.
+**The rewrite is not meaningfully faster per step: ~1.09x, and less than that
+like-for-like** because the legacy figure includes a compressor source lookup
+the Phase 2 rewrite does not have at all.
 
-**Local time stepping contributed nothing here** and was measured, not assumed:
-on a uniform constant-area grid `dt_local` is identical in every cell. It will
-pay on non-uniform meshes and varying area, which is why it stays in the
-config.
+*Error 1.* The original section reported 1.136 ms/step and claimed 1.19x. That
+number timed `advance()` in a loop and never counted the `residual_norm()` that
+`run()` was calling on every step — which cost a further 0.26 ms. The honest
+figure for the code as it then shipped was 1.472 ms/step, i.e. **slower than
+the legacy baseline**. `record_every` now defaults to 10, which amortises the
+check and makes 1.237 ms/step the real number.
+
+## End-to-end
+
+Same problem for both rewrite rows: 99 cells, `A = 0.1 m²`, `p_back = 95000`,
+`tol = 1e-10`, CFL 2.0. `W = 12.023045 kg/s` in every case.
+
+| run | steps | wall | vs baseline |
+| --- | --- | --- | --- |
+| legacy (fixed `tend`, CFL 2.5) | 10,915 | 14.77 s | — |
+| rewrite, **same cold IC as legacy** | 8,180 | 9.80 s | **1.5x** |
+| rewrite, warm IC (u=176, near the answer) | 4,790 | 5.96 s | **2.5x** |
+
+*Error 2.* The original attributed the whole step reduction to
+convergence-based stopping. It is mostly the **initial condition**: from the
+legacy-like cold start (u = 1.28e-4 m/s) the rewrite needs 8,180 steps, and
+only 4,790 from a warm start. Starting near the answer is worth 1.71x;
+convergence stopping is worth 1.33x (10,915 → 8,180).
+
+*Error 3.* The original table listed "convergence stopping 2.2x, stacked ops
+1.19x, CFL 1.17x", which multiplies to 3.06 — not the 2.6 it claimed. The
+10,915→4,204 step ratio was already measured *at* CFL 2.4, so listing CFL
+separately counted it twice.
+
+## The comparison is not like-for-like, and that matters
+
+The legacy 14.77 s solves a **different problem**: `p_back = 101325 − 1e-8`
+**with the compressor source active** (W = 21.49 kg/s). Phase 2 has no source
+term at all, and at that back pressure with no source the duct simply has no
+flow to find. The rewrite rows above use `p_back = 95000` to get a real steady
+flow. Treat the ratio as indicative of scheme cost, not as a controlled
+comparison — a genuine like-for-like number is only available once Phase 3
+puts the source back.
+
+## Where the remaining cost is
+
+Profiling shows no hot spot: `_roe_flux` 22%, `_van_albada` 19%,
+`_reconstruct` 10%, `_harten_entropy_fix` 8.5%, the rest spread thin. That is
+numpy per-call overhead at ~100 cells dominating the arithmetic — precisely the
+regime where D3 (no Numba) costs us. Further gains need fewer numpy calls per
+stage, or a JIT.
+
+**Local time stepping contributes nothing here**, measured rather than assumed:
+on a uniform constant-area grid `dt_local` is identical in every cell. It is
+also now rejected outright when combined with `t_end`, since each cell would
+advance at a different rate and the reported time would be meaningless.

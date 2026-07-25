@@ -21,7 +21,7 @@ from q1d.gas import AIR_LEGACY, PerfectGas
 from q1d.grid import Grid
 from q1d.riemann import SOD_LEFT, SOD_RIGHT, sample_profile
 from q1d.solver import (
-    CFL_STABILITY_LIMIT,
+    CFL_STABILITY_LIMIT_ORDER2,
     NonPhysicalState,
     ReferenceState,
     Solver,
@@ -33,8 +33,43 @@ SOD_GAS = PerfectGas(gamma=1.4, cp=1005.0)
 
 
 def bump_area(x):
-    """Smooth converging–diverging area distribution, 0.1 -> 0.06 -> 0.1."""
+    """Smooth converging–diverging area distribution, 0.1 -> 0.06 -> 0.1.
+
+    NOTE: symmetric about x = 0.5. Mutation testing showed that symmetry makes
+    several geometry bugs invisible (reversing ``a_cell`` is a no-op on it), so
+    ``skew_area`` below exists to break it and is used wherever geometry
+    orientation matters.
+    """
     return 0.1 - 0.04 * np.exp(-(((x - 0.5) / 0.15) ** 2))
+
+
+def skew_area(x):
+    """Deliberately asymmetric area: no mirror symmetry, monotone-ish ramp."""
+    return 0.12 - 0.05 * np.exp(-(((x - 0.32) / 0.11) ** 2)) - 0.02 * x
+
+
+def stretched_grid(n=80, ratio=1.03, area=skew_area):
+    """Geometrically stretched mesh — ``Grid.uniform`` cannot produce one.
+
+    Every grid elsewhere in the suite has uniform ``dx``, which hides bugs in
+    any expression that mixes cell and face indices.
+    """
+    w = ratio ** np.arange(n)
+    x_face = np.concatenate(([0.0], np.cumsum(w / w.sum())))
+    x_cell = 0.5 * (x_face[1:] + x_face[:-1])
+    a_face = np.asarray(area(x_face), dtype=float)
+    a_in = np.asarray(area(x_cell), dtype=float)
+    dx = x_face[1:] - x_face[:-1]
+    vol_in = a_in * dx
+    return Grid(
+        x_face=x_face,
+        a_face=a_face,
+        x_cell=x_cell,
+        dx=dx,
+        da=a_face[1:] - a_face[:-1],
+        a_cell=np.concatenate(([a_in[0]], a_in, [a_in[-1]])),
+        vol=np.concatenate(([vol_in[0]], vol_in, [vol_in[-1]])),
+    )
 
 
 # ===========================================================================
@@ -43,7 +78,8 @@ def bump_area(x):
 
 
 def _stagnant_solver(order, area, bc):
-    grid = Grid.uniform(0.0, 1.0, 80, 0.1 if area == "constant" else bump_area)
+    areas = {"constant": 0.1, "varying": bump_area, "skew": skew_area}
+    grid = Grid.uniform(0.0, 1.0, 80, areas[area])
     ref = ReferenceState(rho=1.2, u=100.0, p=101325.0)
     solver = Solver(grid, GAS, bc, ref, SolverConfig(order=order))
     solver.set_state(rho=101325.0 / (GAS.R * 288.15), u=0.0, p=101325.0)
@@ -51,7 +87,7 @@ def _stagnant_solver(order, area, bc):
 
 
 @pytest.mark.parametrize("order", [1, 2])
-@pytest.mark.parametrize("area", ["constant", "varying"])
+@pytest.mark.parametrize("area", ["constant", "varying", "skew"])
 def test_stagnant_field_has_exactly_zero_residual(order, area):
     """The `p·dA` source must telescope against the pressure flux to zero.
 
@@ -64,6 +100,11 @@ def test_stagnant_field_has_exactly_zero_residual(order, area):
     The ghost cells are set to the interior state exactly here, so this
     isolates the property of the *scheme*. Round-off contributed by the
     boundary conditions is measured separately below.
+
+    ``set_state`` derives ``p`` from ``cv`` rather than storing the argument,
+    so this measures the state an RK stage actually produces. An earlier
+    version stored ``p`` directly, leaving it 1 ulp inconsistent with ``cv``
+    and making this gate bitwise-zero on a state the time-stepper never visits.
     """
     solver, _ = _stagnant_solver(order, area, Transmissive())
     solver.cv[:, 0] = solver.cv[:, 1]
@@ -79,12 +120,17 @@ def test_stagnant_field_has_exactly_zero_residual(order, area):
     # Mass and energy cannot be bitwise zero when the area varies: recovering
     # rho = (rho*A)/A is not an exact round trip, so the initial field itself
     # is non-uniform at the ulp level. They must sit at round-off.
-    scale = 101325.0 * float(np.max(np.abs(solver.grid.a_face)))
-    assert np.max(np.abs(residual[0])) < 1e-14 * scale
-    assert np.max(np.abs(residual[2])) < 1e-14 * scale
+    # Mass and energy are bitwise zero on constant and bump areas, and 2.1e-16
+    # absolute on the skew area, where recovering rho = (rho0*A)/A is not an
+    # exact round trip so the Roe dissipation sees ulp-level non-uniformity.
+    # (An earlier version asserted "< 1e-14 * scale" -- 1e-10 absolute -- and
+    # attributed it to that round trip without ever measuring it. The bound was
+    # six orders loose and would not have caught a real defect.)
+    assert np.max(np.abs(residual[0])) < 1e-15
+    assert np.max(np.abs(residual[2])) < 1e-15
 
 
-@pytest.mark.parametrize("area", ["constant", "varying"])
+@pytest.mark.parametrize("area", ["constant", "varying", "skew"])
 def test_characteristic_boundaries_add_only_round_off_to_a_stagnant_field(area):
     """The BC quadratic costs a few ulps, and it is the same in both areas.
 
@@ -95,10 +141,14 @@ def test_characteristic_boundaries_add_only_round_off_to_a_stagnant_field(area):
     boundary, not from the geometric source term.
     """
     bc = StagnationInletStaticOutlet(p0_in=101325.0, T0_in=288.15, p_back=101325.0)
-    solver, grid = _stagnant_solver(2, area, bc)
-    scale = 101325.0 * float(np.max(grid.a_face))  # p*A, the momentum flux scale
-    relative = np.max(np.abs(solver.residual())) / scale
-    assert relative < 1e-13, f"relative residual {relative:.3e}"
+    solver, _ = _stagnant_solver(2, area, bc)
+    # Measured: the characteristic quadratic reproduces the stagnation state
+    # bit-for-bit at u = 0, so the boundaries cost nothing beyond the ulp-level
+    # density non-uniformity already present. An earlier version asserted
+    # "< 1e-13" while claiming "a few ulps" -- the number asserted was never
+    # the number measured.
+    assert np.max(np.abs(solver.residual()[1])) == 0.0  # momentum, bitwise
+    assert np.max(np.abs(solver.residual())) < 1e-15
 
 
 def test_stagnant_field_stays_stagnant_under_time_marching():
@@ -475,7 +525,7 @@ def test_grid_validates_its_shapes():
 
 
 def test_measured_cfl_stability_limit():
-    """Pin the true stability limit, which is not the one the coefficients imply.
+    """The stability limit is mesh-dependent, and the shipped default is safe.
 
     ``RK5`` is Blazek's *hybrid* 5-stage set, tuned for dissipation evaluated at
     stages 1/3/5 only. This solver evaluates it at every stage, so that tuning
@@ -483,11 +533,15 @@ def test_measured_cfl_stability_limit():
     bitwise zero at t=0, so any growth is pure amplification rather than
     physics: CFL 2.44 holds at the round-off floor, CFL 2.46 does not.
 
-    The legacy default was 2.5 — past the limit.
+    Measured limits (order 2, stagnant varying-area duct, residual bitwise zero
+    at t=0 so growth is pure amplification): 2.475 at n=40, 2.452 at n=80,
+    2.440 at n=160, 2.435 at n=320 — falling with refinement. Order 1 is far
+    more forgiving at ~3.13. The legacy default of 2.5 is past the limit on
+    every mesh tested.
     """
 
-    def noise_after(cfl, steps=400):
-        grid = Grid.uniform(0.0, 1.0, 80, bump_area)
+    def noise_after(cfl, steps=400, n=80):
+        grid = Grid.uniform(0.0, 1.0, n, bump_area)
         bc = StagnationInletStaticOutlet(p0_in=101325.0, T0_in=288.15, p_back=101325.0)
         solver = Solver(
             grid, GAS, bc, ReferenceState(rho=1.2, u=100.0, p=101325.0), SolverConfig(cfl=cfl)
@@ -500,10 +554,17 @@ def test_measured_cfl_stability_limit():
         _, u, _, _ = solver.primitives()
         return float(np.max(np.abs(u[1:-1])))
 
-    assert noise_after(2.44) < 1e-4, "CFL 2.44 should be stable"
-    assert noise_after(2.46) > 1e-2, "CFL 2.46 should be unstable"
-    assert 2.44 < CFL_STABILITY_LIMIT < 2.46
-    assert SolverConfig().cfl < CFL_STABILITY_LIMIT  # default carries margin
+    # The shipped default must be stable across meshes and over a long horizon.
+    # This is the assertion that actually protects a user.
+    for n in (80, 160, 320):
+        assert noise_after(SolverConfig().cfl, steps=5000, n=n) < 1e-4, f"default unstable at n={n}"
 
-    # and it is a genuine floor, not slow growth: 10x the steps stays bounded
-    assert noise_after(2.0, steps=4000) < 1e-4
+    # The limit is NOT a single number: it falls with mesh refinement, and 2.44
+    # -- previously pinned as "stable" -- is unstable by n=160 once the horizon
+    # is long enough to reveal it. The 400-step probe that produced that claim
+    # was too short.
+    assert noise_after(2.44, steps=400, n=80) < 1e-4  # what the old test saw
+    assert noise_after(2.44, steps=5000, n=160) > 1e-2  # what it missed
+    assert noise_after(2.6, steps=400, n=80) > 1e-2  # comfortably past it either way
+
+    assert SolverConfig().cfl < CFL_STABILITY_LIMIT_ORDER2  # default carries margin
