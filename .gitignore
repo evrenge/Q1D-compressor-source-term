@@ -12,3 +12,6 @@ venv/
 *.npy
 *.png
 prof
+
+# profiler output
+pr

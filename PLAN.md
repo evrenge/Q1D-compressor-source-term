@@ -1,6 +1,6 @@
 # Quasi-1D Euler Solver with Turbomachinery Source Terms — Development Plan
 
-Status: **Phase 1 complete, Phase 2 next**
+Status: **Phase 2 complete, Phase 3 next**
 Last updated: 2026-07-25
 
 ---
@@ -430,36 +430,60 @@ Tautological tests it identified, all replaced or strengthened:
 
 Suite: **88 tests**, `ruff` clean.
 
-### Phase 2 — Solver core, optimized, source terms OFF
+### Phase 2 — Solver core, optimized, source terms OFF ✅ **complete**
 
-Performance (measured wins from §3.4):
-- `np.where` for `entropy_corr`, `np.interp` for lookups.
-- Preallocation and `out=` on hot arrays; fuse operations to cut numpy
-  per-call overhead, which at 99 cells exceeds the actual arithmetic.
-- Throttled diagnostics; remove dead allocations.
-- Residual-norm history with convergence-based stopping.
-- Establish the true stability limit empirically: the `ark` coefficients are
-  Blazek's hybrid set, valid for dissipation evaluated at stages 1/3/5 only,
-  whereas the prototype evaluates it at every stage. The CFL limit those
-  coefficients were tuned for therefore does not apply.
+Modules: `q1d.grid` (explicit ghost-cell layout), `q1d.boundary` (conditions as
+objects, with the supersonic branches the legacy code lacked), `q1d.solver`
+(Roe + MUSCL + 5-stage RK, residual norms, convergence-based stopping),
+`q1d.riemann` (exact Riemann solver, verification only).
 
-Correctness:
-- `uref`/`volref` from a reference state, not from the IC.
-- Physically sane initialization.
-- `+=` on the geometric source.
-- `dt` clipped at `tend`.
-- Supersonic branches at both boundaries; no silent clamping.
+**Gate met**, with no source term anywhere in the tests:
 
-Expected outcome: ~5–10× over baseline (numpy only, no JIT).
+1. **Well-balancedness — bitwise zero.** The momentum residual of a stagnant
+   varying-area duct is exactly `0.0`, both reconstruction orders. Achieved by
+   writing the geometric source as `p·A_r − p·A_l` rather than `p·(A_r − A_l)`:
+   floating-point multiplication does not distribute, so the two differ by an
+   ulp and only the first cancels the flux term exactly.
+2. **Sod against the exact Riemann solution.** L1 errors 2.0e-3 (ρ) at n=400,
+   converging at ~1st order as expected for captured discontinuities, with
+   2nd-order reconstruction beating 1st.
+3. **Steady nozzle against the area–Mach relation.** Face mass flux uniform to
+   1e-12; every cell on the analytic Φ(M) curve to 2e-4.
 
-**Gate — with no source term anywhere in the code:**
-1. Uniform flow preserved to machine zero in a **varying-area** duct
-   (well-balancedness of the `p·dA` term).
-2. Sod shock tube against the exact Riemann solution.
-3. Steady converging–diverging nozzle against the analytic area–Mach relation.
+Performance: **14.77 s → 5.76 s (2.6x)**. Full analysis in `BASELINE.md`.
 
-This establishes that the discretization is sound *before* any compressor
-physics can be blamed for anything.
+#### Findings
+
+- **CFL 2.5 is unstable.** Measured on a stagnant varying-area duct whose
+  residual starts at bitwise zero, so any growth is pure amplification rather
+  than physics: **CFL 2.44 stable, 2.46 not**. The legacy default sits past the
+  limit. This is what the `ark` coefficients predicted — Blazek's hybrid set is
+  tuned for dissipation at stages 1/3/5, and both solvers evaluate it every
+  stage. Default now 2.0; `CFL_STABILITY_LIMIT = 2.45` is pinned by a test.
+- **Two review findings withdrawn, both mine** — see §4.5 (`Fx` contains the
+  wall reaction, so `+=` on the geometric source would double-count) and §4.6
+  (`volref = 1.0` is a unit normalisation, and "fixing" it switches the limiter
+  off across shocks). The genuine limiter defect was `uref` alone.
+- **A sign error in the new boundary code**, not the legacy one: subsonic
+  outflow used `J ∓ 2c_b/(γ−1)` with the sign inverted at both ends.
+- **The scheme is not strictly monotone for systems.** Density, pressure *and*
+  velocity all overshoot/undershoot at the shock foot and rarefaction head
+  (0.5%, 0.7%, 0.8% respectively). All five extrema shrink monotonically with
+  `limiter_factor`, which attributes them to the van Albada smoothness
+  parameter rather than to the Riemann solver. Bounds are measured, not chosen.
+- **Nozzle stagnation-pressure loss converges at ~3rd order** (1.10e-3, 1.16e-4,
+  1.53e-5, 1.99e-6 at n = 100…800) — numerical entropy generation through the
+  throat, not a spurious source. This matters directly for Phase 3, since the
+  compressor reads p₀ upstream of the disk; a plateau would have corrupted the
+  map lookup, and the refinement test would fail if one appeared.
+
+#### Caveat carried into Phase 3
+
+The 1e-8 Phase 3 tolerance is a **constant-area** statement. `BASELINE.md`
+shows the constant-area far field uniform to 1e-8 because the Roe dissipation
+vanishes identically there. With variable area, the ~3rd-order stagnation
+pressure loss above enters, so the mesh must be fine enough to keep that term
+below the tolerance. Relevant when D8 (equal areas) is eventually relaxed.
 
 ### Phase 3 — Actuator disk, ideal gas, runtime evaluation
 

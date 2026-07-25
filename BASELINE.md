@@ -108,3 +108,55 @@ Revised against PLAN.md §5, now that the true cost distribution is known:
 The earlier microbenchmarks (PLAN.md §3.4) measured the routines in isolation
 and over-weighted them relative to the full solve. They remain correct as
 per-call costs and wrong as a share of runtime.
+
+---
+
+# Phase 2 result — the rewrite measured against this baseline
+
+Measured 2026-07-25, same problem: 99 interior cells, `A = 0.1 m²`, order 2,
+5-stage RK, `entropy_fix = 0.05`.
+
+| metric | legacy | rewrite | ratio |
+| --- | --- | --- | --- |
+| per-step cost | 1.350 ms | **1.136 ms** | 1.19x |
+| steps to solution | 10,915 (fixed `tend`) | 4,204 (residual 1e-10, CFL 2.4) | 2.6x |
+| **end-to-end** | **14.77 s** | **5.76 s** | **2.6x** |
+
+`W = 12.023045 kg/s` is identical across CFL 2.0/2.4 and global/local time
+stepping, so none of this changed the answer.
+
+## The prediction was wrong, and by how much
+
+`PLAN.md` Phase 2 estimated 5–10x from numpy vectorisation. We got **2.6x**,
+and essentially none of it came from where the plan said it would.
+
+**Vectorising `entropy_corr` and `interp1d` bought nothing measurable.** The
+first version of the rewrite — with both replaced — ran at **1.349 ms/step**
+against the legacy 1.350 ms. The savings were traded away against overhead
+added elsewhere: `primitives()` allocations, per-variable loops in
+reconstruction, `np.array([...])` construction in the flux, and dataclass
+construction in the boundary conditions.
+
+This was foreseeable. `BASELINE.md` already recorded that those microbenchmarks
+were "correct as per-call costs and wrong as a share of runtime" — they account
+for ~0.7 s of 14.77 s. Predicting a 5–10x speedup from them was the same error
+made twice.
+
+## Where the 2.6x actually comes from
+
+| change | contribution |
+| --- | --- |
+| Convergence-based stopping (4,204 steps vs 10,915) | 2.2x |
+| Stacked array ops: 6 `_van_albada` calls/stage → 2, 3 Harten calls → 1, cheaper positivity guard | 1.19x |
+| CFL 2.4 instead of 2.0 | 1.17x |
+
+Profiling the rewrite shows no remaining hot spot — `_roe_flux` 22%,
+`_van_albada` 19%, `_reconstruct` 10%, `_harten_entropy_fix` 8.5%, the rest
+spread thin. That is the signature of numpy per-call overhead at ~100 cells
+dominating the arithmetic, which is exactly the regime where D3 (no Numba)
+costs us. Further gains need either fewer numpy calls per stage or a JIT.
+
+**Local time stepping contributed nothing here** and was measured, not assumed:
+on a uniform constant-area grid `dt_local` is identical in every cell. It will
+pay on non-uniform meshes and varying area, which is why it stays in the
+config.

@@ -163,6 +163,7 @@ class Solver:
         # dominates the arithmetic, so avoiding fresh allocations matters
         self._du = np.zeros((3, n + 3))
         self._cvold = np.zeros((3, n + 2))
+        self._prim = np.zeros((3, n + 2))
 
         # van Albada thresholds: limfac^3 * ref^2 * (vol/volref)^1.5
         lim3 = self.config.limiter_factor**3
@@ -204,7 +205,9 @@ class Solver:
             cv[2] - 0.5 * cv[1] * cv[1] / cv[0],
             out=self.p,
         )
-        if not (np.all(np.isfinite(self.p)) and np.all(self.p > 0.0) and np.all(cv[0] > 0.0)):
+        # min() returns NaN if any element is NaN, so `not (m > 0)` catches
+        # non-positive and non-finite in one reduction per array.
+        if not (self.p.min() > 0.0 and cv[0].min() > 0.0):
             bad = int(np.argmin(np.where(np.isfinite(self.p), self.p, -np.inf)))
             raise NonPhysicalState(
                 f"non-physical state at step t={self.t:.6g}: cell {bad} has "
@@ -217,29 +220,34 @@ class Solver:
     # -- spatial discretisation --------------------------------------------
 
     def _reconstruct(self, rho, u):
-        """Left/right face states. Returns six arrays of length ``n+1``."""
-        p = self.p
+        """Left/right face states, each ``(3, n+1)`` as ``[rho, u, p]``.
+
+        Operates on all three variables as one stacked array rather than
+        looping over them. At ~100 cells the numpy per-call overhead exceeds
+        the arithmetic, so collapsing six ``_van_albada`` calls per stage into
+        two is worth more than any change to the expressions themselves.
+        """
+        prim = self._prim
+        prim[0] = rho
+        prim[1] = u
+        prim[2] = self.p
         if self.config.order == 1:
-            return rho[:-1], u[:-1], p[:-1], rho[1:], u[1:], p[1:]
+            return prim[:, :-1], prim[:, 1:]
 
         du = self._du
-        du[0, 1:-1] = rho[1:] - rho[:-1]
-        du[1, 1:-1] = u[1:] - u[:-1]
-        du[2, 1:-1] = p[1:] - p[:-1]
+        np.subtract(prim[:, 1:], prim[:, :-1], out=du[:, 1:-1])
         du[:, 0] = du[:, 1]
         du[:, -1] = du[:, -2]
 
-        left, right = [], []
-        for k, var in enumerate((rho, u, p)):
-            eps = self._eps2[k]
-            dr = 0.5 * _van_albada(du[k, 2:], du[k, 1:-1], eps)
-            dl = 0.5 * _van_albada(du[k, 1:-1], du[k, :-2], eps)
-            left.append(var[:-1] + dl)
-            right.append(var[1:] - dr)
-        return left[0], left[1], left[2], right[0], right[1], right[2]
+        eps = self._eps2
+        dr = _van_albada(du[:, 2:], du[:, 1:-1], eps)
+        dl = _van_albada(du[:, 1:-1], du[:, :-2], eps)
+        return prim[:, :-1] + 0.5 * dl, prim[:, 1:] - 0.5 * dr
 
-    def _roe_flux(self, rl, ul, pl, rr, ur, pr) -> np.ndarray:
+    def _roe_flux(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
         gas = self.gas
+        rl, ul, pl = left
+        rr, ur, pr = right
         hl = gas.g_over_gm1 * pl / rl + 0.5 * ul * ul
         hr = gas.g_over_gm1 * pr / rr + 0.5 * ur * ur
         qrl, qrr = ul * rl, ur * rr
@@ -261,10 +269,9 @@ class Solver:
         c2a = gas.gm1 * (hav - q2a)
         cav = np.sqrt(c2a)
 
+        # One stacked Harten correction rather than three separate calls.
         delta = self.config.entropy_fix * cav
-        e1 = _harten_entropy_fix(np.abs(uav - cav), delta)
-        e2 = _harten_entropy_fix(np.abs(uav), delta)
-        e3 = _harten_entropy_fix(np.abs(uav + cav), delta)
+        e1, e2, e3 = _harten_entropy_fix(np.abs(np.stack((uav - cav, uav, uav + cav))), delta)
 
         dp = pr - pl
         h1 = rav * cav * (ur - ul)
