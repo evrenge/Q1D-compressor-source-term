@@ -19,6 +19,7 @@ import pytest
 from q1d.analytic import (
     CompressorSolution,
     InfeasibleOperatingPoint,
+    InletChokeLimited,
     choked_mass_flow,
     compressor_exit_stagnation,
     compressor_source_terms,
@@ -26,6 +27,7 @@ from q1d.analytic import (
     flow_function,
     mach_from_flow_function,
     max_flow_function,
+    minimum_back_pressure,
     static_from_stagnation,
     zero_d_compressor,
 )
@@ -138,6 +140,46 @@ def test_inversion_rejects_infeasible_flow_function():
         mach_from_flow_function(-0.1, GAS)
 
 
+def test_inversion_rejects_nan():
+    """NaN compares False against everything, so it needs an explicit guard.
+
+    Without one it slips past both range checks and the bracket collapses onto
+    M = 1, returning 0.9999999999999929 for garbage input — the worst possible
+    failure mode for a routine that arbitrates a PDE solver.
+    """
+    nan = float("nan")
+    with pytest.raises(ValueError, match="NaN"):
+        mach_from_flow_function(nan, GAS)
+    with pytest.raises(ValueError, match="NaN"):
+        static_from_stagnation(T01, P01, nan, A1, GAS)
+    with pytest.raises(ValueError, match="NaN"):
+        zero_d_compressor(P01, T01, nan, PR, ETA, A1, A2, GAS)
+
+
+def test_inversion_converges_at_newton_rate_not_bisection_rate():
+    """Guards the *algorithm*, not just its answer.
+
+    Bisection on [0, 1] needs ~47 iterations to reach 1e-14; Newton needs a
+    handful. Capping maxiter well below the bisection requirement means a
+    reversed Newton step, a disabled Newton step, or a degradation to pure
+    bisection all show up as a RuntimeError rather than passing silently.
+    """
+    for M_true in [0.05, 0.2, 0.5, 0.6647817795154938, 0.9]:
+        phi = flow_function(M_true, GAS)
+        got = mach_from_flow_function(phi, GAS, maxiter=10)
+        assert got == pytest.approx(M_true, rel=1e-11)
+    for M_true in [1.2, 2.0, 4.0, 6.0]:
+        phi = flow_function(M_true, GAS)
+        got = mach_from_flow_function(phi, GAS, supersonic=True, maxiter=10)
+        assert got == pytest.approx(M_true, rel=1e-10)
+    # Confirm the cap is genuinely below what bisection alone would need, so
+    # the test above could actually fail. M = 0.99 is the slowest subsonic
+    # case (13 steps); M = 0.5 would be a useless probe since it is the
+    # starting midpoint and converges immediately.
+    with pytest.raises(RuntimeError, match="failed to converge"):
+        mach_from_flow_function(flow_function(0.99, GAS), GAS, maxiter=4)
+
+
 def test_inversion_works_for_other_gases():
     for gas in [PerfectGas(1.33, 1150.0), PerfectGas(1.667, 5193.0)]:
         for M_true in [0.15, 0.6, 0.95, 2.5]:
@@ -195,10 +237,38 @@ def test_choke_limits_match_review_values():
     assert choked_mass_flow(LEGACY_P02, LEGACY_T02, A2, GAS) == pytest.approx(28.1208, abs=1e-4)
 
 
+def test_choked_mass_flow_matches_the_textbook_formula():
+    """External check, not a round trip.
+
+    ``test_choked_mass_flow_is_exactly_sonic`` (removed) was circular:
+    ``choked_mass_flow`` multiplies by ``max_flow_function`` and
+    ``static_from_stagnation`` divides it straight back out, so replacing
+    ``max_flow_function`` with any other value left the test passing. Compare
+    against the independent closed form instead:
+
+        W_choke = p0*A*sqrt(gamma/(R*T0)) * (2/(gamma+1))**((gamma+1)/(2(gamma-1)))
+    """
+    g, R = GAS.gamma, GAS.R
+    for p0, T0, A in [(P01, T01, A1), (LEGACY_P02, LEGACY_T02, A2), (60000.0, 250.0, 0.37)]:
+        expected = (
+            p0 * A * math.sqrt(g / (R * T0)) * (2.0 / (g + 1.0)) ** ((g + 1.0) / (2.0 * (g - 1.0)))
+        )
+        assert choked_mass_flow(p0, T0, A, GAS) == pytest.approx(expected, rel=1e-14)
+    # and pinned absolutely, so a change in either route is visible
+    assert choked_mass_flow(P01, T01, A1, GAS) == pytest.approx(24.12007042162616, rel=1e-13)
+    assert choked_mass_flow(LEGACY_P02, LEGACY_T02, A2, GAS) == pytest.approx(
+        28.120755274, rel=1e-10
+    )
+
+
 def test_choked_mass_flow_is_exactly_sonic():
     W = choked_mass_flow(P01, T01, A1, GAS)
     st = static_from_stagnation(T01, P01, W, A1, GAS)
     assert st.M == pytest.approx(1.0, rel=1e-12)
+    # pin the sonic static state externally too, so the round trip cannot be
+    # satisfied by an arbitrary choking criterion
+    assert st.T == pytest.approx(T01 / (1.0 + 0.5 * GAS.gm1), rel=1e-13)
+    assert st.p == pytest.approx(P01 * (2.0 / GAS.gp1) ** GAS.g_over_gm1, rel=1e-13)
 
 
 # ===========================================================================
@@ -392,6 +462,48 @@ def test_Shat_equals_tau_minus_one(solution):
     assert solution.Shat == pytest.approx(solution.tau - 1.0, rel=1e-13)
 
 
+def test_dimensionless_coefficients_have_pinned_absolute_values(solution):
+    """The collapse test alone cannot see a wrong Fx.
+
+    A sign-flipped momentum term, or Fx scaled by an arbitrary constant, still
+    collapses perfectly across inlet conditions — the collapse only tests
+    dimensional homogeneity. Pinning the absolute values closes that gap, and
+    catches the ``p01`` vs ``p02`` and ``A1`` vs ``A2`` denominator mutations.
+    """
+    assert solution.Fhat == pytest.approx(0.17086043460763642, rel=1e-12)
+    assert solution.Shat == pytest.approx(0.05941391570905539, rel=1e-12)
+    assert solution.Fhat == pytest.approx(solution.Fx / (solution.p01 * solution.A1), rel=1e-15)
+
+
+def test_momentum_source_with_unequal_areas_includes_the_wall_reaction():
+    """With A1 != A2 the momentum-flux jump is not the blade force.
+
+    Integrating ``d/dx[(rho u^2 + p)A] = p dA/dx + f_blade`` gives
+    ``Delta[(rho u^2 + p)A] = int p dA + F_blade``. For a contraction the wall
+    term dominates and the total goes *negative*, which is why
+    ``compressor_source_terms`` refuses unequal areas unless the caller states
+    how the wall term is accounted for.
+    """
+    with pytest.raises(ValueError, match="wall_pressure_integral"):
+        compressor_source_terms(T01, P01, 10.0, PR, ETA, 0.1, 0.05, GAS)
+
+    Fx, _ = compressor_source_terms(
+        T01, P01, 10.0, PR, ETA, 0.1, 0.05, GAS, wall_pressure_integral=0.0
+    )
+    assert Fx == pytest.approx(-3709.9098, rel=1e-6)  # negative, and pinned
+
+    # subtracting a wall integral shifts it exactly, and the A1/A2 roles are
+    # not interchangeable (this kills the swap mutation)
+    Fx_shift, _ = compressor_source_terms(
+        T01, P01, 10.0, PR, ETA, 0.1, 0.05, GAS, wall_pressure_integral=500.0
+    )
+    assert Fx_shift == pytest.approx(Fx - 500.0, rel=1e-12)
+    Fx_swapped, _ = compressor_source_terms(
+        T01, P01, 10.0, PR, ETA, 0.05, 0.1, GAS, wall_pressure_integral=0.0
+    )
+    assert abs(Fx_swapped - Fx) > 1000.0
+
+
 def test_solution_is_invariant_in_dimensionless_form():
     ref = zero_d_compressor(P01, T01, PB, PR, ETA, A1, A2, GAS)
     # scale the whole problem: same PR and same pb/p01, different absolute level
@@ -428,7 +540,7 @@ def test_with_equal_areas_the_inlet_always_limits_before_the_exit():
     assert area_ratio_threshold == pytest.approx(0.857732, rel=1e-5)
 
     # equal areas, back pressure driven right down: inlet-limited, not exit-choked
-    with pytest.raises(InfeasibleOperatingPoint, match="cannot pass"):
+    with pytest.raises(InletChokeLimited, match="inlet choke limit"):
         zero_d_compressor(P01, T01, 0.3 * P01, PR, ETA, A1, A2, GAS)
 
 
@@ -443,9 +555,43 @@ def test_low_back_pressure_chokes_a_contracted_exit():
     assert sol.W == pytest.approx(choked_mass_flow(sol.p02, sol.T02, 0.05, GAS), rel=1e-12)
 
 
+def test_the_exit_choke_regime_boundary_is_sharp():
+    """Pin the M2 = 1 threshold itself, not just a point far past it.
+
+    The only prior exit-choke test drove M2 to 1.56, so a threshold moved to
+    0.95 or 1.05 went undetected — silently clamping a range of genuinely
+    subsonic exits to sonic, or letting supersonic demands through.
+    """
+    A2_small = 0.05
+    T02, p02 = compressor_exit_stagnation(T01, P01, PR, ETA, GAS)
+    pb_crit = p02 * (2.0 / GAS.gp1) ** GAS.g_over_gm1  # exit static at M2 = 1
+
+    just_subsonic = zero_d_compressor(P01, T01, pb_crit * 1.001, PR, ETA, A1, A2_small, GAS)
+    assert just_subsonic.regime == "subsonic"
+    assert 0.98 < just_subsonic.station2.M < 1.0
+
+    just_choked = zero_d_compressor(P01, T01, pb_crit * 0.999, PR, ETA, A1, A2_small, GAS)
+    assert just_choked.regime == "exit_choked"
+    assert just_choked.station2.M == pytest.approx(1.0, rel=1e-12)
+
+    # mass flow is continuous across the boundary and pins at the choke value
+    assert just_choked.W == pytest.approx(just_subsonic.W, rel=2e-3)
+    assert just_choked.W == pytest.approx(choked_mass_flow(p02, T02, A2_small, GAS), rel=1e-12)
+
+
+def test_inlet_choke_limit_is_reported_with_its_boundary():
+    pb_min = minimum_back_pressure(P01, T01, PR, ETA, A1, A2, GAS)
+    zero_d_compressor(P01, T01, pb_min * 1.0001, PR, ETA, A1, A2, GAS)  # just inside
+    with pytest.raises(InletChokeLimited) as exc:
+        zero_d_compressor(P01, T01, pb_min * 0.999, PR, ETA, A1, A2, GAS)
+    assert exc.value.W_choke == pytest.approx(24.12007042162616, rel=1e-12)
+    assert exc.value.pb_min == pytest.approx(pb_min, rel=1e-15)
+    assert pb_min == pytest.approx(93839.1, abs=1.0)
+
+
 def test_high_pressure_ratio_can_make_the_inlet_infeasible():
     # A large PR with A1 == A2 demands more flow than station 1 can pass.
-    with pytest.raises(InfeasibleOperatingPoint, match="cannot pass"):
+    with pytest.raises(InletChokeLimited, match="inlet choke limit"):
         zero_d_compressor(P01, T01, PB, 3.0, ETA, A1, A2, GAS)
 
 

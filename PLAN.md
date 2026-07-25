@@ -129,7 +129,8 @@ F̂ ≡ Fx/(p₀₁·A₁) = (pₛ₂/p₀₁)(A₂/A₁)(1 + γM₂²) − (p�
 with M₁ from `Φ₁ = W√(R·T₀₁)/(A₁·p₀₁)` and M₂ from
 `Φ₂ = Φ₁·(A₁/A₂)·√τ/PR`. Both are pure functions of Φ₁ given γ, A₂/A₁ and the
 map. Verified across three inlet conditions (101325/288.15, 60000/250,
-150000/320) whose raw `Fx` differ by a factor of 2.9:
+150000/320) whose raw `Fx` differ by a factor of exactly 2.5 (at fixed Φ₁,
+`Fx ∝ p₀₁`, so the ratio is 150000/60000):
 
 ```
 max relative spread of F̂ :  ~1e-15  (machine precision)
@@ -202,7 +203,8 @@ the source terms; correctness and structure decide it.
 | 3 | `interp1d` linear scan: 3.45 s, 30× the cost of the physics it replaces | High (perf) | P2 |
 | 4 | `entropy_corr` scalar Python loop: 2.61 s | High (perf) | P2 |
 | 5 | `setStatic` fixed-point iteration converges at rate M²; silently returns non-converged state above M ≈ 0.90. Confirmed: hits the 100-iteration cap at M₁ = 0.9243 | High | P1 |
-| 6 | Geometric source overwritten rather than accumulated at the disk cell (`q1[50] = ...` should be `+=`). Latent — harmless only because `da = 0` | High (latent) | P2 |
+| 6 | ~~Geometric source overwritten rather than accumulated at the disk cell (`q1[50] = ...` should be `+=`)~~ **This finding was wrong — see §4.5.** The legacy overwrite is correct given how `Fx` is defined | withdrawn | — |
+| 6b | `Fx` is the *total* momentum-flux jump, which already contains the wall reaction `∫p·dA`; it is the blade force only when `A₁ = A₂`, and goes negative for a contraction | High (latent) | P1 ✅ |
 | 7 | `uref` taken from the IC where u = 1.28e-4 m/s — a factor 1.4e6 below the operating velocity, so the velocity limiter never disengages | Medium | P2 |
 | 8 | `volref = 1.0` against a 1.01e-3 m³ cell scales all limiter thresholds by 3.2e-5 | Medium | P2 |
 | 9 | IC derived from a 1e-8 Pa pressure difference: M = 3.8e-7 (450× machine epsilon); `e = cv·T₀` uses stagnation temperature; `ρEA` omits u²/2 | Medium | P2 |
@@ -224,14 +226,43 @@ p  : eps2n=1.11e+06  vs  du²=1e+04   -> limiter OFF in smooth regions (intended
 Disengaging the limiter in smooth regions is the *purpose* of Blazek's ε². Only
 the velocity threshold is broken, and only because of `uref`.
 
+### 4.5 Correction: `Fx` already contains the wall reaction
+
+Found in the Phase 1 audit, and it withdraws finding #6 above.
+
+Integrating the quasi-1D momentum equation across the machine:
+
+```
+d/dx[(ρu² + p)A] = p·dA/dx + f_blade
+  ⟹  Δ[(ρu² + p)A] = ∫p·dA + F_blade
+```
+
+`Fx = pₛ₂A₂ − pₛ₁A₁ + W(u₂ − u₁)` is the **left-hand side** — the total axial
+momentum source, blade force *plus* wall pressure reaction. Consequences:
+
+- **Finding #6 is withdrawn.** Changing `q1[50] = Fx` to `+=` would add
+  `p·dA` on top of a quantity that already contains it, double-counting the
+  wall term. The legacy overwrite was right. The correct rule is: *inject the
+  total momentum source and do not add the geometric term in that cell*, or
+  *subtract `∫p·dA` first and then accumulate*. Either is consistent; mixing
+  them is not.
+- **`Fx` is not positive everywhere.** At `A₁ = 0.1, A₂ = 0.05, W = 10` it is
+  **−3709.91 N**, because the wall term dominates. The §4.3 rebuttal below is
+  a *constant-area* statement.
+- A zero-thickness actuator disk has one area by definition, so
+  `compressor_source_terms` now rejects `A₁ ≠ A₂` unless the caller passes
+  `wall_pressure_integral` explicitly. This makes the accounting a decision
+  rather than an accident, and it is what Phase 3 will rely on.
+
 ### 4.3 Findings rejected on review
 
 Raised during earlier review; examined and found incorrect. Recorded so they do
 not get re-raised.
 
-- **"`Fx` has no zero crossing, therefore no equilibrium exists."** `Fx` is the
-  blade force on the fluid. A compressor always pushes the fluid; `Fx` should be
-  positive everywhere and has no reason to cross zero. Equilibrium is a
+- **"`Fx` has no zero crossing, therefore no equilibrium exists."** The
+  conclusion does not follow, though the premise needs the qualifier added in
+  §4.5: at **constant area** `Fx` is the blade force on the fluid, a compressor
+  always pushes, and `Fx` stays positive. Equilibrium is a
   vanishing *residual*, not a vanishing source. The blade force is balanced by
   the static pressure rise it creates, which lives in the flux term
   `(ρu² + p)A`. At steady state
@@ -328,10 +359,53 @@ Two findings from the phase:
 
 The key structural test is
 `test_source_terms_reconstruct_station_2_from_station_1`: it solves the
-mass/momentum/energy balance independently of `analytic.py` (as a quadratic in
-exit velocity) and recovers station 2 to 1e-10. That identity is what makes the
-Phase 3 gate reachable — the Q1D solver's discrete conservation is exact, so
-the downstream uniform state is whatever this reconstruction gives.
+mass/momentum/energy balance (as a quadratic in exit velocity) and recovers
+station 2 to 1e-10. That identity is what makes the Phase 3 gate reachable —
+the Q1D solver's discrete conservation is exact, so the downstream uniform
+state is whatever this reconstruction gives.
+
+**Narrowing an earlier overstatement:** this test is independent of
+`analytic.py`'s *code path*, not of its *definitions*. `Fx` and `SWx` are
+constructed from station 2, so recovering station 2 is a bookkeeping identity —
+it is blind to errors in the compressor thermodynamics themselves (τ built with
+`·η` instead of `/η` passes it). It remains a strong test of the
+source-term ↔ station bookkeeping; the compressor relation is pinned separately
+by `test_exit_stagnation_matches_legacy`.
+
+#### Phase 1 audit
+
+An independent adversarial audit re-derived the physics from first principles,
+recomputed every §3.1 value without importing `q1d` (agreement ≤ 4.4e-15,
+including a 60-digit `Decimal` cross-check), and ran 36 mutations against the
+suite. It confirmed the §3.1 corrections and the equal-area choke result above.
+Defects it found, all now fixed:
+
+| finding | fix |
+| --- | --- |
+| **NaN passed silently through the Mach inversion**, returning M = 0.99999999999999 — every comparison against NaN is False, so it slipped both range checks and bisected onto the sonic point | explicit `isnan` guard; tested at all three entry points |
+| **`Fx` includes the wall reaction** (§4.5) | documented; `A₁ ≠ A₂` now rejected unless `wall_pressure_integral` is given |
+| **Newton had degraded to bisection.** The bracket was shrunk onto the current iterate *before* stepping from it, so near the root the step landed on the bracket boundary and was rejected: 40 iterations at M = 0.5, 38 of them fallbacks | reordered to the `rtsafe` form (NR §9.4). Now **5–13** evaluations across the range; guarded by a `maxiter` cap below what bisection would need |
+| Inlet-choked back pressures reported as generic infeasibility | dedicated `InletChokeLimited` carrying `W_choke` and `pb_min` |
+| `PR < 1` silently applied the compressor efficiency convention to an expansion | rejected with a message naming the turbine convention |
+| Two `# pragma: no cover` comments asserted unreachable branches that are reachable | comments corrected, limits named as constants |
+| Feasibility slack inconsistent between call sites | single `FEASIBILITY_SLACK` constant |
+| §3.2's "factor of 2.9" | it is exactly 2.5 |
+
+Tautological tests it identified, all replaced or strengthened:
+
+- `test_choked_mass_flow_is_exactly_sonic` was **fully circular** —
+  `choked_mass_flow` multiplies by `max_flow_function` and
+  `static_from_stagnation` divides it back out, so replacing
+  `max_flow_function` with any value left the test green. Now checked against
+  the independent closed form and pinned absolutely.
+- The invariance collapse test **could not see a wrong `Fx` at all**: a
+  sign-flipped momentum term still collapses to 2e-15, because the collapse
+  only tests dimensional homogeneity. F̂ and Ŝ are now pinned absolutely.
+- The exit-choke regime boundary was untested (the only test drove M₂ ≈ 1.56,
+  so a threshold moved to 0.95 or 1.05 survived). Now bracketed at ±0.1%.
+- No test asserted `Fx` for `A₁ ≠ A₂`, so swapping the two areas survived.
+
+Suite: **88 tests**, `ruff` clean.
 
 ### Phase 2 — Solver core, optimized, source terms OFF
 
@@ -517,3 +591,19 @@ D10.
   nothing about the disk's own transient behaviour.
 - **`legacy/` provenance.** The frozen reference must be the author's original
   `.py` files. Code reconstructed from a PDF rendering is not a reference.
+  *Mitigated:* the transcription reproduces six values computed independently
+  beforehand, and the solver reaches the analytic answer to +0.0099%.
+- **The inlet-choked branch is not modelled.** `zero_d_compressor` solves the
+  subsonic-matched problem only. Below `minimum_back_pressure` (93839 Pa at the
+  reference conditions) the inlet chokes, mass flow pins at 24.1201 kg/s, and
+  the back pressure stops setting the operating point — the model raises
+  `InletChokeLimited` rather than guessing. Whether a constant-area duct with a
+  sonic inlet and subsonic exit is even well posed is a genuine physics
+  question, not just a missing feature; deferred until Phase 5 needs it.
+- **Accuracy limits of the Mach inversion**, measured: worst subsonic absolute
+  error 1.4e-12 at M = 0.9998 (consistent with the documented `O(√δ)`
+  conditioning near choke); relative error degrades to 5e-10 as γ → 1
+  (`PerfectGas(1.0001, 4000)` at M = 0.999), well outside any gas of interest
+  but worth knowing before NASA9 arrives.
+- **Supersonic bracket is capped** at `MAX_SUPERSONIC_MACH = 1e4`; flow
+  functions below ~1.5e-18 are rejected rather than solved.

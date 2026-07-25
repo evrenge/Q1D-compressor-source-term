@@ -26,8 +26,21 @@ from dataclasses import dataclass
 
 from .gas import PerfectGas
 
+#: Relative slack on feasibility checks, so a state that is sonic to round-off
+#: is accepted rather than rejected. Used consistently by every feasibility
+#: test in this module.
+FEASIBILITY_SLACK = 1e-12
+
+#: Upper bound of the supersonic bracket search. Flow functions below roughly
+#: 1.5e-18 correspond to Mach numbers above this and are rejected.
+MAX_SUPERSONIC_MACH = 1e4
+
 __all__ = [
+    "FEASIBILITY_SLACK",
+    "MAX_SUPERSONIC_MACH",
     "InfeasibleOperatingPoint",
+    "InletChokeLimited",
+    "minimum_back_pressure",
     "StaticState",
     "CompressorSolution",
     "flow_function",
@@ -51,6 +64,26 @@ class InfeasibleOperatingPoint(ValueError):
     The legacy ``setStatic`` printed ``'choked'`` for this case, which
     conflated the two (``PLAN.md`` §4.2 #14).
     """
+
+
+class InletChokeLimited(InfeasibleOperatingPoint):
+    """The back pressure demands more flow than the inlet can pass.
+
+    A *distinct* condition from :class:`InfeasibleOperatingPoint`: the duct is
+    in a perfectly real inlet-choked state with the mass flow pinned at the
+    inlet choke limit. What does not exist is the **subsonic-matched** solution
+    this 0D model solves for, because with the inlet sonic the back pressure no
+    longer sets the flow.
+
+    Carries ``W_choke`` and ``pb_min`` so a caller can see the boundary rather
+    than having to search for it. See ``PLAN.md`` §8 for why the inlet-choked
+    branch is not modelled here.
+    """
+
+    def __init__(self, message: str, W_choke: float, pb_min: float):
+        super().__init__(message)
+        self.W_choke = W_choke
+        self.pb_min = pb_min
 
 
 @dataclass(frozen=True)
@@ -93,8 +126,8 @@ class CompressorSolution:
     phi2: float
 
     # source terms
-    Fx: float  # [N]   axial blade force on the fluid
-    SWx: float  # [W]   shaft power into the fluid
+    Fx: float  # [N] net axial momentum source: blade force + wall reaction
+    SWx: float  # [W] shaft power into the fluid
     Fhat: float  # Fx  / (p01 * A1)
     Shat: float  # SWx / (W * cp * T01)
 
@@ -166,9 +199,15 @@ def mach_from_flow_function(
     """
     phi_max = max_flow_function(gas)
 
+    # NaN must be rejected explicitly. Every comparison against NaN is False,
+    # so without this guard NaN slips past both range checks, past the early
+    # exits, and then drives the bracket onto M = 1 by pure bisection --
+    # returning a plausible near-sonic Mach number for garbage input.
+    if math.isnan(phi):
+        raise ValueError("flow function is NaN")
     if phi < 0.0:
         raise ValueError(f"flow function must be non-negative, got {phi!r}")
-    if phi > phi_max * (1.0 + 1e-12):
+    if phi > phi_max * (1.0 + FEASIBILITY_SLACK):
         raise InfeasibleOperatingPoint(
             f"flow function {phi:.12g} exceeds the sonic maximum {phi_max:.12g}; "
             "no state passes this mass flow through this area at this stagnation state"
@@ -186,39 +225,71 @@ def mach_from_flow_function(
         lo, hi = 1.0, 1.0
         while flow_function(hi, gas) > phi:
             hi *= 1.5
-            if hi > 1e4:  # pragma: no cover - unreachable for finite phi > 0
-                raise InfeasibleOperatingPoint("no supersonic bracket found")
+            if hi > MAX_SUPERSONIC_MACH:
+                raise InfeasibleOperatingPoint(
+                    f"supersonic solution for phi={phi:.6g} lies above the "
+                    f"M = {MAX_SUPERSONIC_MACH:g} search limit"
+                )
     else:
         lo, hi = 0.0, 1.0
 
-    # Orientation: f = Phi(M) - phi is increasing in M on the subsonic branch
-    # and decreasing on the supersonic branch. Track it so the bracket update
-    # is branch-agnostic.
-    increasing = not supersonic
+    # Newton with a bisection safeguard, in the `rtsafe` ordering (Numerical
+    # Recipes §9.4). The ordering matters: an earlier version shrank the
+    # bracket onto the current iterate *before* stepping from it, so once
+    # Newton approached the root its own step landed on the bracket boundary,
+    # was rejected as out of bounds, and convergence degraded to pure
+    # bisection -- 40 iterations at M = 0.5, of which 38 were fallbacks.
+    # Here the bracket is updated from the sign at the *new* point instead.
+    def residual(M: float) -> float:
+        return flow_function(M, gas) - phi
+
+    f_lo, f_hi = residual(lo), residual(hi)
+    if f_lo == 0.0:
+        return lo
+    if f_hi == 0.0:
+        return hi
+    # Orient so that `xl` is the end where the residual is negative. This makes
+    # the loop identical on the subsonic branch (Phi increasing) and the
+    # supersonic branch (Phi decreasing).
+    xl, xh = (lo, hi) if f_lo < 0.0 else (hi, lo)
 
     M = 0.5 * (lo + hi)
+    dx_prev = abs(hi - lo)
+    dx = dx_prev
+    f = residual(M)
+    df = d_flow_function(M, gas)
+
     for _ in range(maxiter):
-        f = flow_function(M, gas) - phi
-        if (f > 0.0) == increasing:
-            hi = M
+        # Bisect when the Newton step would leave the bracket, or when it is
+        # not halving the interval fast enough.
+        out_of_bracket = ((M - xh) * df - f) * ((M - xl) * df - f) > 0.0
+        if out_of_bracket or abs(2.0 * f) > abs(dx_prev * df):
+            dx_prev, dx = dx, 0.5 * (xh - xl)
+            M = xl + dx
+            # Bisection converges when the interval itself underflows -- compare
+            # against the bracket end, not the previous iterate. (Comparing to
+            # the previous iterate returns the midpoint on the first step,
+            # because that is where the iteration starts.)
+            if xl == M:
+                return M
         else:
-            lo = M
+            dx_prev, dx = dx, f / df
+            M_prev, M = M, M - dx
+            if M_prev == M:
+                return M
+        if abs(dx) <= tol * max(1.0, abs(M)):
+            return M
 
-        d = d_flow_function(M, gas)
-        step_ok = d != 0.0
-        if step_ok:
-            M_new = M - f / d
-            step_ok = lo < M_new < hi
-        if not step_ok:
-            M_new = 0.5 * (lo + hi)
+        f = residual(M)
+        df = d_flow_function(M, gas)
+        if f < 0.0:
+            xl = M
+        else:
+            xh = M
 
-        if abs(M_new - M) <= tol * max(1.0, abs(M_new)):
-            return M_new
-        M = M_new
-
-    raise RuntimeError(  # pragma: no cover - the bisection safeguard prevents this
-        f"Mach inversion failed to converge for phi={phi!r}"
-    )
+    # Reachable only if maxiter is set below what bisection needs; the
+    # safeguard bounds the iteration count, it does not remove this branch.
+    raise RuntimeError(f"Mach inversion failed to converge for phi={phi!r} in {maxiter} iterations")
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +350,13 @@ def compressor_exit_stagnation(
 
     Returns ``(T02, p02)``.
     """
-    if PR <= 0.0:
-        raise ValueError(f"pressure ratio must be positive, got {PR!r}")
+    if PR < 1.0:
+        raise ValueError(
+            f"pressure ratio must be >= 1 for a compressor, got {PR!r}. "
+            "Expansion needs the turbine convention tau = 1 - eta*(1 - PR**k), "
+            "not this one -- applying it here would silently return the wrong "
+            "sign of work"
+        )
     if not 0.0 < eta <= 1.0:
         raise ValueError(f"isentropic efficiency must be in (0, 1], got {eta!r}")
     tau = 1.0 + (PR**gas.gm1_over_g - 1.0) / eta
@@ -296,8 +372,9 @@ def compressor_source_terms(
     A1: float,
     A2: float,
     gas: PerfectGas,
+    wall_pressure_integral: float | None = None,
 ) -> tuple[float, float]:
-    """Axial blade force and shaft power for a given upstream state and flow.
+    """Net axial momentum source and shaft power for an upstream state and flow.
 
     This is the function Phase 3 calls at runtime, from the *locally measured*
     upstream stagnation state — not a tabulated value (``PLAN.md`` P1).
@@ -307,20 +384,68 @@ def compressor_source_terms(
         F_x = p_{s2}A_2 - p_{s1}A_1 + \\dot m (u_2 - u_1), \\qquad
         \\dot S_W = \\dot m (h_{02} - h_{01})
 
-    ``Fx`` is the force **on the fluid**, so it is positive for a compressor at
-    every operating point. It has no reason to vanish at equilibrium: the blade
-    force is balanced by the static pressure rise it creates, which lives in
-    the flux term, not the source (``PLAN.md`` §4.3).
+    **``Fx`` is the total momentum source, not the blade force alone.**
+    Integrating the quasi-1D momentum equation
+    ``d/dx[(rho u^2 + p)A] = p dA/dx + f_blade`` across the machine gives
+
+    .. math::
+
+        \\Delta\\left[(\\rho u^2 + p)A\\right]
+            = \\int p\\,dA + F_\\text{blade}
+
+    so the expression above already contains the wall pressure reaction. The
+    two coincide only when ``A1 == A2``, where ``\\int p\\,dA`` vanishes.
+
+    Consequences worth stating plainly:
+
+    * A caller that injects ``Fx`` **must not also add** the geometric
+      ``p·dA`` term in the same cell — that double-counts the wall reaction.
+    * ``Fx`` is positive at every operating point *for a constant-area
+      machine*. With a contraction it is routinely negative (for
+      ``A1 = 0.1, A2 = 0.05`` at ``W = 10`` it is −3710 N), because the wall
+      term dominates. The claim in ``PLAN.md`` §4.3 that a compressor's ``Fx``
+      never crosses zero is a constant-area statement.
+
+    A zero-thickness actuator disk has a single area by definition, so
+    ``A1 != A2`` is rejected unless the caller supplies
+    ``wall_pressure_integral`` explicitly, making the accounting a decision
+    rather than an accident.
 
     Returns ``(Fx [N], SWx [W])``.
     """
+    if wall_pressure_integral is None:
+        if A1 != A2:
+            raise ValueError(
+                f"A1={A1!r} != A2={A2!r}: the returned momentum source would include "
+                "the wall pressure reaction, which is not the blade force. Pass "
+                "wall_pressure_integral explicitly to state how it is accounted for, "
+                "or use equal areas for a zero-thickness actuator disk"
+            )
+        wall_pressure_integral = 0.0
+
     T02, p02 = compressor_exit_stagnation(T01, p01, PR, eta, gas)
     st1 = static_from_stagnation(T01, p01, W, A1, gas)
     st2 = static_from_stagnation(T02, p02, W, A2, gas)
 
-    Fx = st2.p * A2 - st1.p * A1 + W * (st2.u - st1.u)
+    Fx = st2.p * A2 - st1.p * A1 + W * (st2.u - st1.u) - wall_pressure_integral
     SWx = W * (gas.enthalpy(T02) - gas.enthalpy(T01))
     return Fx, SWx
+
+
+def minimum_back_pressure(
+    p01: float, T01: float, PR: float, eta: float, A1: float, A2: float, gas: PerfectGas
+) -> float:
+    """Lowest back pressure for which a subsonic-matched solution exists.
+
+    Below this the inlet chokes, the mass flow pins at
+    :func:`choked_mass_flow`, and the back pressure stops setting the operating
+    point. See :class:`InletChokeLimited`.
+    """
+    T02, p02 = compressor_exit_stagnation(T01, p01, PR, eta, gas)
+    W_choke = choked_mass_flow(p01, T01, A1, gas)
+    phi2 = W_choke * math.sqrt(gas.R * T02) / (A2 * p02)
+    M2 = mach_from_flow_function(phi2, gas)
+    return p02 / (1.0 + 0.5 * gas.gm1 * M2 * M2) ** gas.g_over_gm1
 
 
 def zero_d_compressor(
@@ -346,6 +471,9 @@ def zero_d_compressor(
     Raises :class:`InfeasibleOperatingPoint` if station 1 cannot pass the
     resulting mass flow.
     """
+    if A1 <= 0.0 or A2 <= 0.0:
+        raise ValueError(f"areas must be positive, got A1={A1!r}, A2={A2!r}")
+
     T02, p02 = compressor_exit_stagnation(T01, p01, PR, eta, gas)
     tau = T02 / T01
 
@@ -369,11 +497,17 @@ def zero_d_compressor(
     W = phi2 * A2 * p02 / math.sqrt(gas.R * T02)
 
     phi1 = W * math.sqrt(gas.R * T01) / (A1 * p01)
-    if phi1 > max_flow_function(gas):
-        raise InfeasibleOperatingPoint(
-            f"station 1 cannot pass {W:.6g} kg/s: required flow function {phi1:.6g} "
-            f"exceeds the sonic maximum {max_flow_function(gas):.6g}. "
-            f"Inlet choke limit is {choked_mass_flow(p01, T01, A1, gas):.6g} kg/s"
+    if phi1 > max_flow_function(gas) * (1.0 + FEASIBILITY_SLACK):
+        W_choke = choked_mass_flow(p01, T01, A1, gas)
+        pb_min = minimum_back_pressure(p01, T01, PR, eta, A1, A2, gas)
+        raise InletChokeLimited(
+            f"back pressure {pb:.6g} Pa demands {W:.6g} kg/s, above the inlet choke "
+            f"limit {W_choke:.6g} kg/s. The duct is inlet-choked and the flow is "
+            f"pinned there, but the back pressure no longer sets the operating point, "
+            f"so the subsonic matching this model solves has no solution. "
+            f"Subsonic matching is valid for pb >= {pb_min:.6g} Pa",
+            W_choke=W_choke,
+            pb_min=pb_min,
         )
 
     st1 = static_from_stagnation(T01, p01, W, A1, gas)
