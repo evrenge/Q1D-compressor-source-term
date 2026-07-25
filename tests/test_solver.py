@@ -12,6 +12,8 @@ No source term appears anywhere in this file. Three independent references:
    ``q1d.analytic.flow_function``.
 """
 
+import math
+
 import numpy as np
 import pytest
 
@@ -609,3 +611,157 @@ def test_measured_cfl_stability_limit():
     assert noise_after(2.6, steps=400, n=80) > 1e-2  # comfortably past it either way
 
     assert SolverConfig().cfl < CFL_STABILITY_LIMIT_ORDER2  # default carries margin
+
+
+# ===========================================================================
+# The source hook — the one line Phase 3 is built on
+# ===========================================================================
+
+
+def test_source_hook_sign_and_shape_contract():
+    """`rhs -= source(solver)`, so a positive source *adds* to the conserved state.
+
+    Until now no test executed this line at all. Its sign convention and shape
+    contract are the entire interface between the solver and the actuator disk,
+    so they are pinned directly against the residual rather than inferred from
+    a converged answer.
+    """
+    grid = Grid.uniform(0.0, 1.0, 40, 0.1)
+    solver = Solver(grid, GAS, Transmissive(), ReferenceState(rho=1.2, u=120.0, p=101325.0))
+    solver.set_state(rho=1.2, u=120.0, p=101325.0)
+
+    q = np.zeros((3, grid.n_interior))
+    q[1, 17] = 1731.24  # a blade force, in newtons
+    q[2, 17] = 3.7e5  # shaft power, in watts
+
+    without = solver.residual().copy()
+    solver.source = lambda s: q
+    with_source = solver.residual()
+
+    # rhs -= q, exactly, with no other change
+    assert np.allclose(without - with_source, q, rtol=0.0, atol=1e-9)
+    assert with_source.shape == (3, grid.n_interior)
+
+
+def test_positive_momentum_source_accelerates_the_flow():
+    """Sign check in physical terms, not just algebraic."""
+    grid = Grid.uniform(0.0, 1.0, 60, 0.1)
+    bc = StagnationInletStaticOutlet(p0_in=101325.0, T0_in=288.15, p_back=95000.0)
+    solver = Solver(grid, GAS, bc, ReferenceState(rho=1.2, u=150.0, p=101325.0))
+    solver.set_state(rho=1.19, u=150.0, p=99000.0)
+    assert solver.run(max_steps=4000, tol=1e-9).converged
+    base = solver.cv.copy()
+    _, u0, _, _ = solver.primitives()
+    reference = float(np.mean(u0[1:-1]))
+
+    # A bare constant point force is not a self-regulating actuator disk -- it
+    # keeps pushing regardless of state -- so this is deliberately a
+    # fixed-step comparison rather than a convergence test. The sign is what is
+    # under test, not the steady point.
+    for force, expected_faster in ((+500.0, True), (-500.0, False)):
+        solver.cv[:] = base
+        solver._update_pressure()
+        solver._sync_boundaries()
+        q = np.zeros((3, grid.n_interior))
+        q[1, 30] = force
+        solver.source = lambda s, q=q: q
+        solver.run(max_steps=600)
+        _, u1, _, _ = solver.primitives()
+        faster = float(np.mean(u1[1:-1])) > reference
+        assert faster is expected_faster, f"force {force:+.0f} N gave the wrong direction"
+
+
+def test_source_hook_integral_balance_is_exact():
+    """Total conserved quantity changes by exactly the injected amount.
+
+    With `Transmissive` boundaries and a uniform initial state the net flux
+    through the domain is zero, so one RK step must move the volume integral of
+    `cv` by exactly `dt * sum(q)`. This is the property that makes the Phase 3
+    tolerance reachable, tested here without any compressor physics involved.
+    """
+    grid = Grid.uniform(0.0, 1.0, 50, 0.1)
+    solver = Solver(grid, GAS, Transmissive(), ReferenceState(rho=1.2, u=100.0, p=101325.0))
+    solver.set_state(rho=1.2, u=100.0, p=101325.0)
+
+    q = np.zeros((3, grid.n_interior))
+    q[1, 25] = 2000.0
+    q[2, 25] = 5.0e5
+    solver.source = lambda s: q
+
+    before = (solver.cv[:, 1:-1] * grid.dx).sum(axis=1)
+    dt = solver.timestep()
+    solver.advance(dt)
+    after = (solver.cv[:, 1:-1] * grid.dx).sum(axis=1)
+
+    expected = dt * q.sum(axis=1)
+    assert np.allclose(after - before, expected, rtol=1e-9, atol=1e-6)
+
+
+# ===========================================================================
+# Supersonic boundary branches — advertised in PLAN.md, never executed
+# ===========================================================================
+
+
+def _supersonic_bc(mach=2.0, p0=400000.0, T0=500.0):
+    p_static = p0 * (1.0 + 0.5 * GAS.gm1 * mach**2) ** (-GAS.g_over_gm1)
+    return StagnationInletStaticOutlet(
+        p0_in=p0, T0_in=T0, p_back=0.5 * p_static, p_static_in=p_static
+    ), p_static
+
+
+def test_supersonic_inflow_requires_and_validates_a_third_condition():
+    bc_ok, p_static = _supersonic_bc()
+    T = 500.0 * (p_static / 400000.0) ** GAS.gm1_over_g
+    rho, u, p = p_static / (GAS.R * T), 2.0 * GAS.speed_of_sound(T), p_static
+    c = GAS.speed_of_sound(T)
+
+    ghost = bc_ok.left(rho, u, p, c, GAS)
+    assert ghost.p == pytest.approx(p_static, rel=1e-12)
+    assert ghost.u / GAS.speed_of_sound(ghost.p / (ghost.rho * GAS.R)) == pytest.approx(
+        2.0, rel=1e-9
+    )
+
+    # all three characteristics enter, so p0/T0 alone under-specify the state
+    bc_missing = StagnationInletStaticOutlet(p0_in=400000.0, T0_in=500.0, p_back=50000.0)
+    with pytest.raises(ValueError, match="third condition"):
+        bc_missing.left(rho, u, p, c, GAS)
+
+    # and an imposed triple that is not actually supersonic is rejected
+    bc_bad = StagnationInletStaticOutlet(
+        p0_in=400000.0, T0_in=500.0, p_back=50000.0, p_static_in=399000.0
+    )
+    with pytest.raises(ValueError, match="classified as supersonic"):
+        bc_bad.left(rho, u, p, c, GAS)
+
+
+def test_supersonic_outflow_extrapolates_at_both_ends():
+    bc, _ = _supersonic_bc()
+    rho, u, p = 0.5, 900.0, 50000.0
+    c = math.sqrt(GAS.gamma * p / rho)
+    assert u > c
+
+    right = bc.right(rho, u, p, c, GAS)
+    assert (right.rho, right.u, right.p) == pytest.approx((rho, u, p), rel=1e-14)
+    # reverse supersonic flow through the left boundary is also extrapolation
+    left = bc.left(rho, -u, p, c, GAS)
+    assert (left.rho, left.u, left.p) == pytest.approx((rho, -u, p), rel=1e-14)
+
+
+def test_uniform_supersonic_flow_is_preserved_through_both_boundaries():
+    """End-to-end exercise of the supersonic inlet and outlet together."""
+    mach, p0, T0 = 2.0, 400000.0, 500.0
+    bc, p_static = _supersonic_bc(mach, p0, T0)
+    T = T0 * (p_static / p0) ** GAS.gm1_over_g
+    rho = p_static / (GAS.R * T)
+    u = mach * GAS.speed_of_sound(T)
+
+    grid = Grid.uniform(0.0, 1.0, 60, 0.1)
+    solver = Solver(grid, GAS, bc, ReferenceState(rho=rho, u=u, p=p_static))
+    solver.set_state(rho=rho, u=u, p=p_static)
+    solver.run(max_steps=300)
+
+    r, uu, pp, cc = solver.primitives()
+    assert np.allclose(uu[1:-1], u, rtol=1e-9)
+    assert np.allclose(pp[1:-1], p_static, rtol=1e-9)
+    assert np.allclose(r[1:-1], rho, rtol=1e-9)
+    assert np.all(uu[1:-1] > cc[1:-1])  # still supersonic everywhere
