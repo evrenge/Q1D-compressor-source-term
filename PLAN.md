@@ -189,7 +189,7 @@ the map — and a compressor in a duct genuinely does have its operating point
 set by both ends. The care required is that the feedback be closed properly
 (sub-iterated within the RK stage or relaxed), not left explicit across stages.
 
-### 3.6 The map stores a loss coefficient — not η, and not τ
+### 3.6 The map stores corrected work — not η, not τ, not loss
 
 Two candidates were considered for what the map should carry alongside `Wc`
 and `PR`, and both were rejected by measurement.
@@ -217,24 +217,47 @@ compressor range, 3.4% into turbine territory. That is the same class of error
 as the prototype's dimensional `Fx` table (P1), reintroduced through a
 different door.
 
-**The map stores `ζ = (h₀₂ − h₀₂ₛ) / N²`.** The denominator is never zero, so
-there is no pole. The numerator is an enthalpy difference, so it needs no cp
-assumption. And at fixed corrected speed `N² ∝ T₀₁` while the loss enthalpy
-scales with T₀₁ as well, which is what makes ζ a similarity variable rather
-than merely a well-behaved one. Through the corner above it is smooth,
-positive and monotone: 9389.6 → 5996.9 → 4179.6 → 2796.5 J/kg.
+**Two candidates survive: loss `(h₀₂ − h₀₂ₛ)/N²` and corrected work
+`Δh₀/T₀₁`.** Holding the map's PR and η fixed and varying T₀₁, both drift
+identically and both are 12–24× better than τ:
 
-Runtime reconstruction is then exact for any gas:
+| T₀₁ | τ−1 | Δh₀/T₀₁ | loss/T₀₁ |
+| --- | --- | --- | --- |
+| 230 K | +0.737% | **+0.063%** | **+0.063%** |
+| 313 K | −0.350% | −0.030% | −0.030% |
+| 900 K | −12.902% | −1.158% | −1.158% |
+| 1200 K | −16.751% | −1.530% | −1.530% |
+
+They drift identically because at fixed η they are proportional:
+`loss = Δh₀(1−η)`. This test therefore cannot rank them; they diverge only
+where η varies, which is across the map rather than across ambient. Both are
+finite and monotone through the singular corner (Δh₀ 2932.8 → 8001.3 J/kg
+while loss runs the other way, 9389.6 → 2796.5).
+
+**Directness decides: the map stores corrected work.** The runtime path becomes
 
 ```
-s°(T₀₂ₛ) = s°(T₀₁) + R·ln(PR)      ->  h₀₂ₛ
-h₀₂ = h₀₂ₛ + ζ·N²
-T₀₂ = T(h₀₂)                        ->  SWx = W·(h₀₂ − h₀₁)
+h₀₂ = h₀₁ + Δh₀        ->  SWx = W·Δh₀   and   T₀₂ = T(h₀₂)
+p₀₂ = PR · p₀₁
 ```
 
-Converting the supplied maps from η to ζ at load time needs the design speed
-and the map's reference gas. η remains available as a derived output for
-reporting.
+with **no entropy inversion at all**. Storing loss would require solving
+`s°(T₀₂ₛ) = s°(T₀₁) + R·ln(PR)` on every evaluation purely to add the loss back
+on. η and the isentropic reference remain available as derived outputs for
+reporting, off the hot path.
+
+*Corrected torque* was also considered: `Q_c ∝ Wc·(Δh₀/T₀₁)/Nc` is a composite
+of three quantities the map already stores separately, so it adds coupling
+without adding information. It is trivially recoverable from `Δh₀` and `W` when
+shaft dynamics need it.
+
+**Residual drift is irreducible at two parameters.** The 1.53% at 1200 K is the
+§3.3 effect: no two-parameter grouping is exactly invariant for a real gas. It
+is measured *relative to the map's own reference temperature*, so what matters
+is the range of use relative to that reference, not the absolute level — a
+turbine map generated near its operating temperature carries far less than
+1.5%. If it ever exceeds map accuracy, the third dimension from §3.3 is the
+fix.
 
 ### 3.4 Measured cost of the alternatives
 
@@ -692,7 +715,7 @@ implicit time integration.
 | D7 | Legacy scripts frozen in `legacy/`, never edited | Preserves a diffable reference for original behaviour | 2026-07-25 |
 | D8 | `A₁ = A₂` through Phase 4; variable area is its own later step | Matches the prototype and the available compressor data (inlet and outlet areas only). Avoids reconciling the `p·dA` source with the map's station definitions inside the smeared region before it is needed | 2026-07-25 |
 | D9 | ~~ICMF + β-lines first; ECMF held in reserve for the choke line~~ **Revised: ECMF from the start** | Measured on the supplied maps (§3.5): ICMF is non-monotonic in β at Nc ≥ 0.72 on the compressor and at *every* speed on the turbine, spanning as little as 3.1%. ECMF is monotonic everywhere and spans 72–163%. ECMF is not a choke-line remedy, it is the only invertible coordinate on most of the map | 2026-07-25 |
-| D12 | Maps store a loss coefficient `ζ = (h₀₂ − h₀₂ₛ)/N²`, not isentropic efficiency and not temperature ratio | η is singular where PR → 1 with work input (4 points on the transonic map, sign change through a pole). τ is invariant only for a perfect gas — it drifts 0.15% at 230 K and 3.4% at 1200 K against a 288 K reference, reintroducing the P1 error through a different door. ζ has a denominator that is never zero and a numerator that needs no cp assumption (§3.6). Author's proposal | 2026-07-25 |
+| D12 | Maps store **corrected work** `Δh₀/T₀₁` (equivalently the work coefficient `Δh₀/N²`), not η, not τ, not loss | η is singular where PR → 1 with work input; τ is invariant only for a perfect gas and drifts 16.8% at 1200 K. Loss and corrected work are *equally* invariant — at fixed η they are proportional, `loss = Δh₀(1−η)` — so directness decides: `SWx = W·Δh₀` needs corrected work immediately, whereas loss requires solving the isentropic entropy inversion on every evaluation just to subtract it back out (§3.6). Author's proposal, second alternative | 2026-07-25 |
 | D11 | R = 287.058 J/kg/K (Cantera, dry air) for all new work; `AIR_LEGACY` keeps 287.1429 | Author's decision. The legacy value is derived from cp=1005, γ=1.4 and is 0.03% off. `AIR_LEGACY` is retained solely so the Phase 1–3 regression numbers stay reproducible; the two must never be mixed in one calculation | 2026-07-25 |
 | D10 | Steady-state acceptance only, extended with a hold test | No transient reference data exists yet. A solver that reaches the analytically known point and holds it is accepted for now; revisited when transient data becomes available | 2026-07-25 |
 
