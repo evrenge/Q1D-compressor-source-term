@@ -206,7 +206,7 @@ the source terms; correctness and structure decide it.
 | 6 | ~~Geometric source overwritten rather than accumulated at the disk cell (`q1[50] = ...` should be `+=`)~~ **This finding was wrong — see §4.5.** The legacy overwrite is correct given how `Fx` is defined | withdrawn | — |
 | 6b | `Fx` is the *total* momentum-flux jump, which already contains the wall reaction `∫p·dA`; it is the blade force only when `A₁ = A₂`, and goes negative for a contraction | High (latent) | P1 ✅ |
 | 7 | `uref` taken from the IC where u = 1.28e-4 m/s — a factor 1.4e6 below the operating velocity, so the velocity limiter never disengages | Medium | P2 |
-| 8 | `volref = 1.0` against a 1.01e-3 m³ cell scales all limiter thresholds by 3.2e-5 | Medium | P2 |
+| 8 | ~~`volref = 1.0` against a 1.01e-3 m³ cell scales all limiter thresholds by 3.2e-5~~ **This finding was wrong — see §4.6.** `volref = 1.0` is a unit normalisation and the scaling is the intended mesh dependence | withdrawn | — |
 | 9 | IC derived from a 1e-8 Pa pressure difference: M = 3.8e-7 (450× machine epsilon); `e = cv·T₀` uses stagnation temperature; `ρEA` omits u²/2 | Medium | P2 |
 | 10 | No residual norm, no convergence test — fixed `tend = 0.5` regardless of whether the solution converged at 0.15 s | Medium | P2 |
 | 11 | No supersonic inlet handling; `dis` clamped to 1e-20 silently | Medium | P2 |
@@ -225,6 +225,29 @@ p  : eps2n=1.11e+06  vs  du²=1e+04   -> limiter OFF in smooth regions (intended
 
 Disengaging the limiter in smooth regions is the *purpose* of Blazek's ε². Only
 the velocity threshold is broken, and only because of `uref`.
+
+### 4.6 Correction: `volref = 1.0` is correct
+
+Found in Phase 2, and it withdraws finding #8. The threshold is
+
+```
+eps² = limfac³ · ref² · (vol_cell / volref)^1.5
+```
+
+The `vol_cell^1.5` factor is the Venkatakrishnan/van Albada **smoothness
+parameter** `ε² ~ (K·Δx)³`. It is *supposed* to shrink with mesh size, so that
+the limiter disengages only where the solution varies less than the local mesh
+scale and engages at discontinuities. `volref` is a unit normalisation, not a
+representative cell volume.
+
+Setting `volref` to a typical cell volume — the "fix" this document originally
+called for — scales all three thresholds up by ~3e4 on a 100-cell grid,
+switching the limiter **off across shocks**. Doing so produces negative
+pressures on a Sod shock tube within a few hundred steps.
+
+The genuine defect is #7 alone: `uref` taken from a near-stagnant initial
+condition. `ReferenceState` now documents `vol` as a normalising volume and
+defaults it to 1.0.
 
 ### 4.5 Correction: `Fx` already contains the wall reaction
 

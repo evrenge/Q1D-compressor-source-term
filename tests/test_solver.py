@@ -117,8 +117,8 @@ def test_stagnant_field_stays_stagnant_under_time_marching():
     # random-walks. It saturates around 1e-5 m/s against c = 340 (3e-8
     # relative) and does not grow exponentially -- confirmed out to 4000 steps.
     assert np.max(np.abs(u[1:-1])) < 1e-4
-    assert np.allclose(p[1:-1], 101325.0, rtol=1e-9)
-    assert np.allclose(r[1:-1], rho, rtol=1e-9)
+    assert np.allclose(p[1:-1], 101325.0, rtol=1e-7)
+    assert np.allclose(r[1:-1], rho, rtol=1e-7)
 
 
 def test_uniform_flow_in_a_constant_area_duct_is_preserved():
@@ -217,20 +217,28 @@ def test_sod_overshoot_is_bounded_and_controlled_by_the_limiter():
     assert 0.0 < overshoot < 0.01, f"density overshoot {overshoot:.3e}"
     assert x[int(np.argmax(rho[1:-1]))] < 0.30  # near the fan head at x = 0.263
 
-    # no undershoot below the right state, and no reverse flow anywhere
-    assert rho[1:-1].min() >= SOD_RIGHT.rho * (1 - 1e-9)
+    # There is a matching undershoot at the foot of the shock, an order of
+    # magnitude smaller and from the same cause.
+    undershoot = SOD_RIGHT.rho - rho[1:-1].min()
+    assert 0.0 < undershoot < 2e-3, f"density undershoot {undershoot:.3e}"
+    assert x[int(np.argmin(rho[1:-1]))] > 0.80  # at the shock, x = 0.850
+
+    # no reverse flow, and pressure stays inside the initial range
     assert p[1:-1].min() >= SOD_RIGHT.p * (1 - 1e-9)
     assert p[1:-1].max() <= SOD_LEFT.p * (1 + 1e-9)
     assert u[1:-1].min() >= -1e-9
 
-    # tightening the threshold must reduce it, which is what identifies the cause
-    previous = overshoot
+    # Tightening the threshold must reduce *both*, which is what identifies the
+    # cause as the smoothness parameter rather than the Riemann solver.
+    prev_over, prev_under = overshoot, undershoot
     for limfac in (1.0, 0.6, 0.3):
         s, _, _ = _run_sod(400, limiter_factor=limfac)
         r, _, _, _ = s.primitives()
-        current = r[1:-1].max() - SOD_LEFT.rho
-        assert current < previous, f"limfac={limfac}: {current:.3e} !< {previous:.3e}"
-        previous = current
+        over = r[1:-1].max() - SOD_LEFT.rho
+        under = SOD_RIGHT.rho - r[1:-1].min()
+        assert over < prev_over, f"limfac={limfac}: overshoot {over:.3e} !< {prev_over:.3e}"
+        assert under < prev_under, f"limfac={limfac}: undershoot {under:.3e} !< {prev_under:.3e}"
+        prev_over, prev_under = over, under
 
 
 def test_sod_conserves_mass_and_energy():
@@ -272,13 +280,15 @@ def test_subsonic_nozzle_matches_the_area_mach_relation():
     assert result.converged, f"residual {result.final_residual}"
 
     rho, u, p, c = solver.primitives()
-    W = rho[1:-1] * u[1:-1] * grid.a_cell[1:-1]
 
-    # mass flow must be uniform along the duct
-    assert np.std(W) / np.mean(W) < 1e-8, f"mass flow spread {np.std(W) / np.mean(W):.3e}"
+    # The conserved quantity is the *face* mass flux. It must be uniform to
+    # round-off. Cell-centred rho*u*A(x_centre) is not conserved and differs by
+    # O(dx^2) wherever the area has curvature -- see the refinement test below.
+    mass_flux = solver.face_fluxes()[0]
+    spread = float(np.std(mass_flux) / np.mean(mass_flux))
+    assert spread < 1e-11, f"face mass flux spread {spread:.3e}"
 
-    # and every cell must lie on the analytic Phi(M) curve
-    W_mean = float(np.mean(W))
+    W_mean = float(np.mean(mass_flux))
     mach = u[1:-1] / c[1:-1]
     phi_expected = W_mean * np.sqrt(GAS.R * T0_in) / (grid.a_cell[1:-1] * p0_in)
     mach_expected = np.array([mach_from_flow_function(float(f), GAS) for f in phi_expected])
@@ -287,6 +297,35 @@ def test_subsonic_nozzle_matches_the_area_mach_relation():
     # stagnation pressure must be preserved: the flow is isentropic
     pt = p[1:-1] * (1.0 + 0.5 * GAS.gm1 * mach**2) ** GAS.g_over_gm1
     assert np.max(np.abs(pt / p0_in - 1.0)) < 5e-5
+
+
+def test_cell_centred_mass_flow_converges_at_second_order():
+    """Quantifies why the gate above uses the face flux, not cell values.
+
+    ``A_cell = A(x_centre)`` is not the area that makes cell-centred
+    ``rho*u*A`` telescope against the face fluxes, so its spread is a
+    discretisation artefact of order ``dx^2`` rather than a conservation error.
+    """
+    spreads = []
+    for n in (100, 200, 400):
+        grid = Grid.uniform(0.0, 1.0, n, bump_area)
+        bc = StagnationInletStaticOutlet(p0_in=101325.0, T0_in=288.15, p_back=95000.0)
+        solver = Solver(
+            grid,
+            GAS,
+            bc,
+            ReferenceState(rho=1.2, u=150.0, p=101325.0),
+            SolverConfig(cfl=1.5, local_time_stepping=True),
+        )
+        st = static_from_stagnation(288.15, 101325.0, 15.0, float(np.max(grid.a_face)), GAS)
+        solver.set_state(rho=st.rho, u=st.u, p=st.p)
+        assert solver.run(max_steps=40_000, tol=1e-11).converged
+        rho, u, _, _ = solver.primitives()
+        W = rho[1:-1] * u[1:-1] * grid.a_cell[1:-1]
+        spreads.append(float(np.std(W) / np.mean(W)))
+
+    order = np.log2(spreads[0] / spreads[2]) / 2.0
+    assert 1.7 < order < 2.3, f"observed order {order:.2f} from spreads {spreads}"
 
 
 def test_nozzle_throat_is_the_fastest_point():

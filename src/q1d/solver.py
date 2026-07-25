@@ -281,6 +281,17 @@ class Solver:
         )
         return 0.5 * (central - dissipation) * self.grid.a_face
 
+    def face_fluxes(self) -> np.ndarray:
+        """Numerical fluxes at the ``n+1`` faces, shape ``(3, n+1)``.
+
+        ``face_fluxes()[0]`` is the mass flux, which is the quantity the scheme
+        actually conserves. At steady state it is uniform to round-off, whereas
+        cell-centred ``rho*u*A(x_centre)`` is only uniform to ``O(dx^2)``
+        wherever the area has curvature.
+        """
+        rho, u, _, _ = self.primitives()
+        return self._roe_flux(*self._reconstruct(rho, u))
+
     def residual(self) -> np.ndarray:
         """``d(flux)/dx - sources`` over the interior cells, shape ``(3, n)``.
 
