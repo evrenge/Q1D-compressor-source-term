@@ -1,6 +1,6 @@
 # Quasi-1D Euler Solver with Turbomachinery Source Terms — Development Plan
 
-Status: **Phase 0 complete, Phase 1 next**
+Status: **Phase 1 complete, Phase 2 next**
 Last updated: 2026-07-25
 
 ---
@@ -93,13 +93,21 @@ Configuration: constant-area duct, `A = 0.1 m²`, inlet total `p₀₁ = 101325 
 
 | quantity | value |
 | --- | --- |
-| **W** | **21.49074 kg/s** |
-| M₁ / M₂ | 0.66516 / 0.51707 |
-| p₀₂ / T₀₂ | 121590 Pa / 305.2701 K |
+| **W** | **21.490742688146575 kg/s** |
+| M₁ / M₂ | 0.6647817795154938 / 0.5170711949922851 |
+| p₀₂ / T₀₂ | 121590 Pa / 305.27011981156431 K |
 | pₛ₂ | 101325 Pa (= back pressure, exactly) |
-| Fx | 1730.963 N |
-| SWx | 369.9 kW |
-| τ = T₀₂/T₀₁ | 1.05941392 |
+| Fx | 1731.2433536618760 N |
+| SWx | 369763.7101088717 W |
+| τ = T₀₂/T₀₁ | 1.05941391570906 |
+| Φ₁ / Φ₁ᵐᵃˣ | 0.891 |
+
+> **Corrected 2026-07-25 (Phase 1).** M₁, Fx and SWx were previously listed as
+> 0.66516, 1730.963 N and 369.9 kW. Those came from a review script that
+> evaluated the row at `W = 21.4972` — a mistyped `21.490743`. The mass flow
+> itself was never wrong (it was verified two independent ways), only the
+> quantities derived from it. The values above are produced by
+> `q1d.analytic.zero_d_compressor` and pinned in `tests/test_analytic.py`.
 
 `W_ff` in the prototype's map generator — described there as a "choked flow"
 reference — is in fact **exactly this number**. It is the mass flow through A₂
@@ -293,18 +301,37 @@ silently amended:
   ~0.7 s of 14.77 s, not the majority. Phase 2 priorities in `BASELINE.md` are
   reordered accordingly.
 
-### Phase 1 — 0D analytic reference
+### Phase 1 — 0D analytic reference ✅ **complete**
 
-- Flow function, stagnation relations, guarded Newton for Φ → M (replacing the
-  M²-convergence fixed-point iteration, which degrades exactly where it is
-  needed).
-- `zero_d_compressor(p01, T01, pb, PR, eta, A1, A2)` returning the full steady
-  state.
-- Explicit feasibility reporting: distinguish *choked* from *infeasible*.
+- `q1d.gas.PerfectGas` — thermodynamics behind an object rather than module
+  globals, shaped as the seed of the Phase 4 `Gas` interface (P3).
+- `q1d.analytic` — flow function with closed-form derivative, bracketed Newton
+  for Φ → M on both branches, station states, choke limits, compressor
+  stagnation states, source terms, and `zero_d_compressor`.
+- Explicit feasibility reporting: `InfeasibleOperatingPoint` distinguishes a
+  non-existent state from a *choked* one, which is a valid physical state.
 
-**Gate:** the `W_ff` identity, the 21.49074 kg/s point, both choke limits, and
-internal self-consistency (`pₛ₂ == p_b`) — all as tests. The 0D model is
-trustworthy standing alone before any PDE is solved.
+**Gate met.** 64 tests, all passing, `ruff` clean. Covered: the `W_ff`
+identity, the reference operating point to 1e-12, both choke limits, internal
+self-consistency (`pₛ₂ == p_b`), the §3.2 invariance collapse, and regression
+against five `legacy/` map points plus two `setStatic` calls.
+
+Two findings from the phase:
+
+- **§3.1 carried wrong values for M₁, Fx and SWx** — corrected above.
+- **With `A₁ = A₂` the exit can never choke before the inlet.** Exit choke
+  demands `Φ₁/Φ₁ᵐᵃˣ = (A₂/A₁)·PR/√τ`, which is 1.166 at equal areas, so
+  station 1 always saturates first. The exit only chokes first when
+  `A₂/A₁ < √τ/PR = 0.8577`. Relevant to D8: the equal-area assumption makes
+  the inlet the sole choke-limited station, which simplifies Phase 5's choke
+  handling.
+
+The key structural test is
+`test_source_terms_reconstruct_station_2_from_station_1`: it solves the
+mass/momentum/energy balance independently of `analytic.py` (as a quadratic in
+exit velocity) and recovers station 2 to 1e-10. That identity is what makes the
+Phase 3 gate reachable — the Q1D solver's discrete conservation is exact, so
+the downstream uniform state is whatever this reconstruction gives.
 
 ### Phase 2 — Solver core, optimized, source terms OFF
 
