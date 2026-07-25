@@ -189,6 +189,53 @@ the map — and a compressor in a duct genuinely does have its operating point
 set by both ends. The care required is that the feedback be closed properly
 (sub-iterated within the RK stage or relaxed), not left explicit across stages.
 
+### 3.6 The map stores a loss coefficient — not η, and not τ
+
+Two candidates were considered for what the map should carry alongside `Wc`
+and `PR`, and both were rejected by measurement.
+
+**η is singular.** On `TranssonicCompressor.xlsx`, 4 of 180 points (all at
+Nc = 0.359, low β — the stalled/windmilling corner) have `PR < 1` with the
+compressor still doing work. Isentropic efficiency is undefined there, not
+merely negative: along that speed line η runs −2.2016 → −0.1430 → +0.3741,
+changing sign through a pole.
+
+**τ = T₀₂/T₀₁ is not ambient-invariant.** It is invariant for a *perfect* gas
+by construction, which is what makes the trap easy to fall into. For a real gas
+the isentropic temperature ratio at fixed PR depends on where you sit on the cp
+curve. At η = 0.85, PR = 2, referenced to 288 K:
+
+| T₀₁ | TR perfect gas | TR real gas | drift |
+| --- | --- | --- | --- |
+| 230 K | 1.257663 | 1.259216 | +0.151% |
+| 313 K | 1.257663 | 1.256420 | −0.072% |
+| 800 K | 1.257663 | 1.229068 | −2.247% |
+| 1200 K | 1.257663 | 1.214215 | −3.428% |
+
+Storing τ would bake in the T₀₁ used for the conversion — 0.22% across the
+compressor range, 3.4% into turbine territory. That is the same class of error
+as the prototype's dimensional `Fx` table (P1), reintroduced through a
+different door.
+
+**The map stores `ζ = (h₀₂ − h₀₂ₛ) / N²`.** The denominator is never zero, so
+there is no pole. The numerator is an enthalpy difference, so it needs no cp
+assumption. And at fixed corrected speed `N² ∝ T₀₁` while the loss enthalpy
+scales with T₀₁ as well, which is what makes ζ a similarity variable rather
+than merely a well-behaved one. Through the corner above it is smooth,
+positive and monotone: 9389.6 → 5996.9 → 4179.6 → 2796.5 J/kg.
+
+Runtime reconstruction is then exact for any gas:
+
+```
+s°(T₀₂ₛ) = s°(T₀₁) + R·ln(PR)      ->  h₀₂ₛ
+h₀₂ = h₀₂ₛ + ζ·N²
+T₀₂ = T(h₀₂)                        ->  SWx = W·(h₀₂ − h₀₁)
+```
+
+Converting the supplied maps from η to ζ at load time needs the design speed
+and the map's reference gas. η remains available as a derived output for
+reporting.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -645,6 +692,7 @@ implicit time integration.
 | D7 | Legacy scripts frozen in `legacy/`, never edited | Preserves a diffable reference for original behaviour | 2026-07-25 |
 | D8 | `A₁ = A₂` through Phase 4; variable area is its own later step | Matches the prototype and the available compressor data (inlet and outlet areas only). Avoids reconciling the `p·dA` source with the map's station definitions inside the smeared region before it is needed | 2026-07-25 |
 | D9 | ~~ICMF + β-lines first; ECMF held in reserve for the choke line~~ **Revised: ECMF from the start** | Measured on the supplied maps (§3.5): ICMF is non-monotonic in β at Nc ≥ 0.72 on the compressor and at *every* speed on the turbine, spanning as little as 3.1%. ECMF is monotonic everywhere and spans 72–163%. ECMF is not a choke-line remedy, it is the only invertible coordinate on most of the map | 2026-07-25 |
+| D12 | Maps store a loss coefficient `ζ = (h₀₂ − h₀₂ₛ)/N²`, not isentropic efficiency and not temperature ratio | η is singular where PR → 1 with work input (4 points on the transonic map, sign change through a pole). τ is invariant only for a perfect gas — it drifts 0.15% at 230 K and 3.4% at 1200 K against a 288 K reference, reintroducing the P1 error through a different door. ζ has a denominator that is never zero and a numerator that needs no cp assumption (§3.6). Author's proposal | 2026-07-25 |
 | D11 | R = 287.058 J/kg/K (Cantera, dry air) for all new work; `AIR_LEGACY` keeps 287.1429 | Author's decision. The legacy value is derived from cp=1005, γ=1.4 and is 0.03% off. `AIR_LEGACY` is retained solely so the Phase 1–3 regression numbers stay reproducible; the two must never be mixed in one calculation | 2026-07-25 |
 | D10 | Steady-state acceptance only, extended with a hold test | No transient reference data exists yet. A solver that reaches the analytically known point and holds it is accepted for now; revisited when transient data becomes available | 2026-07-25 |
 
