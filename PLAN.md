@@ -158,6 +158,37 @@ SWx = W·(h₀₂ − h₀₁)
 h₀₂ = h₀₁ + (h(T₀₂ₛ) − h₀₁)/η ,   s°(T₀₂ₛ) = s°(T₀₁) + R·ln(PR)
 ```
 
+### 3.5 The supplied maps make ECMF mandatory, not optional
+
+Measured on `HPC02.xlsx` and `SingleStgTurbine.xlsx` (GasTurb-style β maps: 20
+β lines × N speed lines, sheets for `mass_flow`, `pressure_ratio`,
+`efficiency`, plus `surge_line` for compressors; efficiency is isentropic).
+
+Relative span along β at fixed corrected speed, and whether it is monotonic:
+
+| | ICMF span | mono | ECMF span | mono |
+| --- | --- | --- | --- | --- |
+| Compressor Nc = 0.45 | 119.8% | ✓ | 160.1% | ✓ |
+| Compressor Nc = 0.72 | 48.9% | ✗ | 93.6% | ✓ |
+| Compressor Nc = 1.00 | **7.9%** | ✗ | **72.1%** | ✓ |
+| Compressor Nc = 1.06 | **3.1%** | ✗ | **72.7%** | ✓ |
+| Turbine Nc = 0.80 | 9.6% | ✗ | 143.5% | ✓ |
+| Turbine Nc = 1.10 | **7.6%** | ✗ | **163.1%** | ✓ |
+
+with `Wc2/Wc1 = √τ/PR`.
+
+**Inverting ICMF → β is ill-posed over most of the operating range**, not merely
+near choke: non-monotonic above 72% speed on the compressor and at every speed
+on the turbine, with the whole β range compressed into 3–10% of mass flow. ECMF
+is monotonic everywhere and 20× better conditioned. This reverses D9.
+
+The cost is that ECMF needs the *downstream* stagnation state, which is the
+feedback path that produced defect §4.2 #2. The difference is that in a Q1D
+solver the downstream state is **measured from the field**, not predicted by
+the map — and a compressor in a duct genuinely does have its operating point
+set by both ends. The care required is that the feedback be closed properly
+(sub-iterated within the RK stage or relaxed), not left explicit across stages.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -613,7 +644,8 @@ implicit time integration.
 | D6 | **Consistent real gas, not frozen-γ** | A turbine at 1600 K downstream of a compressor at 300 K spans a γ range where the inconsistency stops being second-order. (Note: frozen-γ evaluates γ(T) locally from real cp — it is not "γ = 1.4 always" — but it still holds γ constant within the Roe average and the Riemann invariants) | 2026-07-25 |
 | D7 | Legacy scripts frozen in `legacy/`, never edited | Preserves a diffable reference for original behaviour | 2026-07-25 |
 | D8 | `A₁ = A₂` through Phase 4; variable area is its own later step | Matches the prototype and the available compressor data (inlet and outlet areas only). Avoids reconciling the `p·dA` source with the map's station definitions inside the smeared region before it is needed | 2026-07-25 |
-| D9 | ICMF + β-lines first; ECMF held in reserve for the choke line | The supplied maps are in ICMF+β form. ECMF is the better parameterization (§7 Q3) but requires closing a downstream-state feedback loop properly, which is deferred until choke behaviour demands it | 2026-07-25 |
+| D9 | ~~ICMF + β-lines first; ECMF held in reserve for the choke line~~ **Revised: ECMF from the start** | Measured on the supplied maps (§3.5): ICMF is non-monotonic in β at Nc ≥ 0.72 on the compressor and at *every* speed on the turbine, spanning as little as 3.1%. ECMF is monotonic everywhere and spans 72–163%. ECMF is not a choke-line remedy, it is the only invertible coordinate on most of the map | 2026-07-25 |
+| D11 | R = 287.058 J/kg/K (Cantera, dry air) for all new work; `AIR_LEGACY` keeps 287.1429 | Author's decision. The legacy value is derived from cp=1005, γ=1.4 and is 0.03% off. `AIR_LEGACY` is retained solely so the Phase 1–3 regression numbers stay reproducible; the two must never be mixed in one calculation | 2026-07-25 |
 | D10 | Steady-state acceptance only, extended with a hold test | No transient reference data exists yet. A solver that reaches the analytically known point and holds it is accepted for now; revisited when transient data becomes available | 2026-07-25 |
 
 Dependencies: `numpy`, `matplotlib`, `pytest`. `scipy` optional — root-finding
