@@ -234,7 +234,36 @@ where η varies, which is across the map rather than across ambient. Both are
 finite and monotone through the singular corner (Δh₀ 2932.8 → 8001.3 J/kg
 while loss runs the other way, 9389.6 → 2796.5).
 
-**Directness decides: the map stores corrected work.** The runtime path becomes
+**Corrected torque drifts identically too**, for the same reason:
+`Qc = Q/δ ∝ Wc·Δh₀/(Nc·θ)`. All three candidates are the same quantity up to
+constants at a fixed map point, so ambient invariance is structurally incapable
+of ranking them. The ranking has to come from behaviour **across** the map,
+where η and Wc vary and the three separate.
+
+Measured over the full grid of both nominated maps at 288 K:
+
+| | range ratio | sign change | non-monotonic in β | worst curvature |
+| --- | --- | --- | --- | --- |
+| Subsonic η | 1.41 | no | 12/12 | 1.46 |
+| Subsonic **corrected work** | 15.07 | no | **0/12** | **0.31** |
+| Subsonic loss | 47.70 | no | 12/12 | 1.42 |
+| Subsonic corrected torque | 36.49 | no | 3/12 | 0.50 |
+| Transonic η | n/a | **YES** | 8/9 | 1.98 |
+| Transonic **corrected work** | 45.48 | no | **0/9** | **0.19** |
+| Transonic loss | 20.34 | no | 9/9 | 0.44 |
+| Transonic corrected torque | 35.59 | no | 2/9 | 0.50 |
+
+(curvature = max |second difference| / mean |first difference| along β, a proxy
+for interpolation difficulty.)
+
+**Corrected work is monotonic in β on every speed line of both maps — uniquely
+so — with curvature 2–7× lower than any alternative.** Loss is non-monotonic on
+*every* line of both maps, making it the worst interpolant of the three despite
+being perfectly well-behaved pointwise. Corrected torque is second but
+non-monotonic on a few lines.
+
+**Directness confirms it: the map stores corrected work.** The runtime path
+becomes
 
 ```
 h₀₂ = h₀₁ + Δh₀        ->  SWx = W·Δh₀   and   T₀₂ = T(h₀₂)
