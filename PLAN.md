@@ -354,8 +354,12 @@ cp — a regression on the entire thermodynamic layer.
 
 ### Phase 5 — Real compressor maps
 
-- `PR(Φ₁, N_corr)`, `η(Φ₁, N_corr)`; ingestion, interpolation, and an explicit
-  extrapolation policy.
+- **Phase 5a — ICMF with β-lines.** The first maps supplied are inlet corrected
+  mass flow with β as a dimension: `PR(β, N)`, `Wc₁(β, N)`, `η(β, N)`. Lookup
+  means solving for β such that `Wc₁(β, N)` matches the measured value.
+  Ingestion, interpolation, and an explicit extrapolation policy.
+- **Phase 5b — ECMF as the choke-line remedy.** See §7 Q3. Adopted only if
+  clamp-and-warn at the choke line proves insufficient.
 - This is where `∂PR/∂Φ₁ < 0` finally supplies aerodynamic stiffness and surge
   dynamics become structurally representable — impossible with a constant-PR
   map, which has zero stiffness by construction.
@@ -381,6 +385,9 @@ implicit time integration.
 | D5 | Φ₁ as the internal map key; Wc₁ as a display column | Φ₁ carries no reference state, making the reference-mismatch bug class unrepresentable | 2026-07-25 |
 | D6 | **Consistent real gas, not frozen-γ** | A turbine at 1600 K downstream of a compressor at 300 K spans a γ range where the inconsistency stops being second-order. (Note: frozen-γ evaluates γ(T) locally from real cp — it is not "γ = 1.4 always" — but it still holds γ constant within the Roe average and the Riemann invariants) | 2026-07-25 |
 | D7 | Legacy scripts frozen in `legacy/`, never edited | Preserves a diffable reference for original behaviour | 2026-07-25 |
+| D8 | `A₁ = A₂` through Phase 4; variable area is its own later step | Matches the prototype and the available compressor data (inlet and outlet areas only). Avoids reconciling the `p·dA` source with the map's station definitions inside the smeared region before it is needed | 2026-07-25 |
+| D9 | ICMF + β-lines first; ECMF held in reserve for the choke line | The supplied maps are in ICMF+β form. ECMF is the better parameterization (§7 Q3) but requires closing a downstream-state feedback loop properly, which is deferred until choke behaviour demands it | 2026-07-25 |
+| D10 | Steady-state acceptance only, extended with a hold test | No transient reference data exists yet. A solver that reaches the analytically known point and holds it is accepted for now; revisited when transient data becomes available | 2026-07-25 |
 
 Dependencies: `numpy`, `matplotlib`, `pytest`. `scipy` optional — root-finding
 will be hand-written and guarded to avoid the dependency unless it earns its
@@ -388,18 +395,75 @@ place.
 
 ---
 
-## 7. Open questions
+## 7. Resolved questions
 
-- **Sampling distance.** How many cells upstream of the disk should Φ₁ be
-  sampled? Far enough to clear the smeared region, near enough to limit
-  transient lag. To be determined empirically in Phase 3.
-- **Area change across the disk.** With `A₁ ≠ A₂` the `p·dA` source inside the
-  smeared region must be made consistent with the map's station definitions.
-  Deferred until a variable-area flowpath is introduced.
-- **Choke-line behaviour.** Φ₁ → M₁ inversion is ill-conditioned as M₁ → 1
-  (§4.4). Needs an explicit strategy before the map is pushed to its choke line
-  in Phase 5.
-- **Transient validation.** Every gate above is a steady-state test. The
-  solver's purpose is transient response, and no transient acceptance criterion
-  has been defined yet. Candidate: acoustic reflection timing against
-  characteristic theory in Phase 2.
+### Q1 — Sampling distance *(resolved: measurement decides)*
+
+How many cells upstream of the disk should Φ₁ be sampled? Far enough to clear
+the smeared region, near enough to limit transient lag. Implemented as a
+parameter, default 3 cells upstream, with a sensitivity sweep in Phase 3. If
+the converged answer moves with sampling distance, that is itself diagnostic —
+the Phase 3 gate says it should not.
+
+### Q2 — Area change across the disk *(resolved: A₁ = A₂ for now)*
+
+Only inlet and outlet areas of the compressor are available, and the prototype
+used equal areas. Equal areas through Phase 4; variable area becomes its own
+step, at which point the `p·dA` source inside the smeared region must be
+reconciled with the map's station definitions. See D8.
+
+### Q3 — Choke-line behaviour *(resolved: ICMF+β first, ECMF in reserve)*
+
+Φ₁ → M₁ inversion is ill-conditioned as M₁ → 1 because dΦ/dM → 0 (§4.4). More
+fundamentally: **when the inlet is choked, inlet corrected flow does not
+determine the operating point** — the speedline is vertical, W is pinned, and
+PR is set by downstream conditions. No reparameterization of inlet quantities
+fixes this; it is physics. β-lines are a well-posedness device for
+interpolation, not a resolution of the underlying degeneracy.
+
+Exit corrected mass flow does resolve it:
+
+```
+Wc₂/Wc₁ = √τ / PR
+```
+
+On a choked segment `Wc₁` is constant while PR sweeps, so `Wc₂ ∝ 1/PR`
+decreases strictly monotonically — the vertical segment unwraps. Traversing a
+full speedline from choke to surge, `Wc₁` falls and PR rises, so `Wc₂` falls
+monotonically throughout and `PR(Wc₂)` is single-valued over the entire line.
+
+The cost is that looking up on `Wc₂` requires `T₀₂` and `p₀₂`, which are the
+map's outputs. In a 0D deck that is circular. In this solver it is not — the
+downstream state is available from the flow field, so it is a measurement
+rather than a prediction. But it is structurally the same downstream feedback
+that produced defect §4.2 #2, and it must be closed properly (sub-iterated
+within the RK stage, or relaxed) rather than left explicit across stages.
+
+**Plan:** ICMF+β through Phase 5a with clamp-and-warn at the choke line;
+ECMF adopted in Phase 5b only if clamping proves insufficient. See D9.
+
+### Q4 — Transient validation *(resolved: steady-only for now)*
+
+No transient reference data exists. Acceptance is steady-state, extended with
+an explicit **hold test** so that "holds the point steadily" is a measurement
+rather than a judgement:
+
+> After the residual reaches its floor, continue for 10× the number of steps
+> taken to converge. Require that the residual stay at its floor (no secular
+> growth) and that mass flow drift by less than the Phase 3 tolerance over that
+> interval.
+
+This catches slow instabilities that a converged-and-stopped run hides —
+including exactly the kind a downstream-keyed source term would produce. See
+D10.
+
+## 8. Known gaps
+
+- **No transient acceptance criterion.** The solver's purpose is transient
+  response and every gate is steady-state. The hold test (Q4) demonstrates
+  stability, not transient *accuracy*. To be revisited when transient data
+  becomes available. Candidate interim check: acoustic reflection timing
+  against characteristic theory, which validates wave propagation but says
+  nothing about the disk's own transient behaviour.
+- **`legacy/` provenance.** The frozen reference must be the author's original
+  `.py` files. Code reconstructed from a PDF rendering is not a reference.
