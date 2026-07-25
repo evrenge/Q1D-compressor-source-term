@@ -288,6 +288,53 @@ turbine map generated near its operating temperature carries far less than
 1.5%. If it ever exceeds map accuracy, the third dimension from §3.3 is the
 fix.
 
+### 3.7 How much corrected work diverges from efficiency — all 21 maps
+
+The decision in §3.6 rested on invariance, monotonicity and directness. This
+measures the remaining question: **if the map stores corrected work instead of
+efficiency, how much does the reconstructed `Δh₀` differ?** Both are calibrated
+at a reference temperature and then used to reconstruct `Δh₀` at another, with
+real-gas thermodynamics (Cantera, dry air). Worst case over every point of
+every supplied map.
+
+**Calibrated at standard day, used everywhere** — the naive choice:
+
+| | 200 K | 600 K | 1000 K | 1600 K |
+| --- | --- | --- | --- | --- |
+| Compressors (13 maps) | 0.88% | 4.23% | 8.08% | **10.69%** |
+| Turbines (8 maps) | 0.18% | 0.90% | 2.67% | **4.37%** |
+
+**Calibrated near each component's own operating range** — the fix:
+
+| Compressors, calibrated 288 K | 200 K | 300 K | 400 K | 500 K | 600 K | 700 K |
+| --- | --- | --- | --- | --- | --- | --- |
+| worst of 13 maps | 0.88% | 0.14% | 1.43% | 2.85% | 4.23% | 5.46% |
+
+| Turbines, calibrated 1300 K | 900 K | 1100 K | 1300 K | 1500 K | 1800 K |
+| --- | --- | --- | --- | --- | --- | --- |
+| worst of 8 maps | 1.53% | 0.65% | **0.00%** | 0.49% | 1.05% |
+
+Conclusions:
+
+- **Turbines are comfortable**: ≤1.53% across 900–1800 K.
+- **Compressors are fine to ~400 K and degrade after** — 5.46% at 700 K, a rear
+  HPC stage, where calibrating at standard day is a real extrapolation.
+- **The drift is entirely relative to the calibration temperature** (exactly
+  0.00% at the calibration point). So the calibration temperature must be a
+  **property of each map**, not a hard-coded 288.15.
+
+**What this number is not.** It is the divergence between two defensible
+modelling choices, not an error against truth. Under exact similarity η and
+`Δh₀/θ` are both preserved and would agree exactly; they diverge only because
+γ(T) breaks similarity. Without rig data at several inlet temperatures neither
+can be declared correct. Where a map is calibrated near its operating point
+they agree to ≤1.5%, so the choice barely matters; where they diverge by 5–10%
+the extrapolation is far enough that *both* are questionable.
+
+Corrected work is still preferred, on the grounds this test does not measure:
+it is monotonic in β on all 21 speed lines of the two nominated maps where η
+manages 1 of 21, and it is finite where η has a pole (§3.6).
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):

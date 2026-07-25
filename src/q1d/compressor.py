@@ -37,6 +37,8 @@ __all__ = [
     "ConstantCompressorMap",
     "DiskState",
     "ActuatorDisk",
+    "MappedCompressor",
+    "MappedDiskState",
 ]
 
 
@@ -221,3 +223,168 @@ class ActuatorDisk:
     @staticmethod
     def flow_function_at_mach(mach: float, gas: PerfectGas) -> float:
         return flow_function(mach, gas)
+
+
+@dataclass
+class MappedDiskState(DiskState):
+    """Adds the map coordinates to the recorded evaluation."""
+
+    beta: float = math.nan
+    corrected_speed: float = math.nan
+    ecmf: float = math.nan
+    Wc: float = math.nan
+    corrected_work: float = math.nan
+    M2: float = math.nan
+    T02: float = math.nan
+
+
+@dataclass
+class MappedCompressor:
+    """Compressor driven by a real β map, keyed on **exit** corrected flow.
+
+    The inlet state is measured upstream and the exit state downstream, both
+    outside the region smeared by the injection. ECMF is formed from the two
+    and inverted to β, which is well posed: ICMF compresses the whole β range
+    into 3–10% of mass flow above 72% speed and is not monotonic, whereas ECMF
+    is monotonic on every speed line of both supplied maps (``PLAN.md`` §3.5).
+
+    Using the downstream state is a *measurement*, not a prediction — but it
+    does close a feedback loop through the source's own output, so the looked-up
+    values are under-relaxed. ``relaxation = 1.0`` disables that.
+
+    The map supplies ``PR`` and **corrected work** ``Δh₀/θ`` rather than
+    efficiency (``PLAN.md`` §3.6), so the energy source is
+    ``SWx = W·Δh₀`` with no isentropic inversion anywhere in the path.
+    """
+
+    cell: int
+    beta_map: object  # BetaMap; annotated loosely to avoid a circular import
+    corrected_speed: float
+    sample_offset: int = 12
+    downstream_offset: int = 12
+    n_smear: int = 1
+    relaxation: float = 0.3
+    ramp_evaluations: int = 0
+    last: MappedDiskState = field(default_factory=MappedDiskState)
+
+    _weights: np.ndarray = field(init=False, repr=False, default=None)
+    _pr: float = field(init=False, repr=False, default=math.nan)
+    _cw: float = field(init=False, repr=False, default=math.nan)
+    _calls: int = field(init=False, repr=False, default=0)
+    _reversals: int = field(init=False, repr=False, default=0)
+
+    def __post_init__(self) -> None:
+        if self.n_smear < 1:
+            raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
+        if self.sample_offset < 1 or self.downstream_offset < 1:
+            raise ValueError("sample offsets must be >= 1 so the disk cell itself is not read")
+        if not 0.0 < self.relaxation <= 1.0:
+            raise ValueError(f"relaxation must be in (0, 1], got {self.relaxation!r}")
+        self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
+
+    @property
+    def reversals(self) -> int:
+        """Evaluations skipped because the sampled station had reverse flow."""
+        return self._reversals
+
+    @staticmethod
+    def _stagnation(solver: Solver, i: int) -> tuple[float, float, float]:
+        """``(T0, p0, W)`` at full-array cell index ``i``."""
+        gas = solver.gas
+        rho, u, p, c = solver.primitives()
+        T = float(p[i]) / (float(rho[i]) * gas.R)
+        mach = float(u[i]) / float(c[i])
+        T0 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
+        p0 = float(p[i]) * (T0 / T) ** gas.g_over_gm1
+        return T0, p0, float(rho[i]) * float(u[i]) * float(solver.grid.a_cell[i])
+
+    def __call__(self, solver: Solver) -> np.ndarray:
+        from .analytic import static_from_stagnation
+
+        gas = solver.gas
+        grid = solver.grid
+        n = grid.n_interior
+        last_cell = self.cell + self.n_smear - 1
+        if self.cell - self.sample_offset < 0 or last_cell + self.downstream_offset >= n:
+            raise ValueError(
+                f"disk at cell {self.cell} with offsets "
+                f"({self.sample_offset}, {self.downstream_offset}) does not fit in {n} cells"
+            )
+        area = float(grid.a_face[self.cell])
+        if not np.all(grid.a_face[self.cell : last_cell + 2] == area):
+            raise ValueError("area varies across the disk cells; see PLAN.md §4.5")
+
+        i_up = self.cell - self.sample_offset + 1
+        i_dn = last_cell + self.downstream_offset + 1
+        T01, p01, W = self._stagnation(solver, i_up)
+        T02m, p02m, _ = self._stagnation(solver, i_dn)
+
+        theta = T01 / 288.15
+        delta = p01 / 101325.0
+
+        # During a startup transient the field can momentarily reverse at the
+        # sampling station. The map has no meaning at negative flow, so the
+        # source is switched off for that evaluation rather than the lookup
+        # being fed a negative flow function. This is counted, and a run that
+        # converges with reversals recorded should not be trusted.
+        if W <= 0.0 or T02m <= 0.0 or p02m <= 0.0:
+            self._reversals += 1
+            self.last = MappedDiskState(W=W, T01=T01, p01=p01)
+            return np.zeros((3, n))
+
+        ecmf = W * math.sqrt(T02m / 288.15) / (p02m / 101325.0)
+
+        point = self.beta_map.evaluate_at_ecmf(ecmf, self.corrected_speed)
+
+        # Under-relax the feedback path: the lookup coordinate depends on the
+        # downstream state this source produces.
+        if math.isnan(self._pr):
+            self._pr, self._cw = point.PR, point.corrected_work
+        else:
+            r = self.relaxation
+            self._pr += r * (point.PR - self._pr)
+            self._cw += r * (point.corrected_work - self._cw)
+
+        dh0 = self._cw * theta
+        T02 = T01 + dh0 / gas.cp
+        p02 = self._pr * p01
+
+        st1 = static_from_stagnation(T01, p01, W, area, gas)
+        st2 = static_from_stagnation(T02, p02, W, area, gas)
+        Fx = st2.p * area - st1.p * area + W * (st2.u - st1.u)
+        SWx = W * dh0
+
+        self.last = MappedDiskState(
+            phi1=W * math.sqrt(gas.R * T01) / (area * p01),
+            W=W,
+            T01=T01,
+            p01=p01,
+            PR=self._pr,
+            eta=point.efficiency,
+            Fx=Fx,
+            SWx=SWx,
+            beta=point.beta,
+            corrected_speed=self.corrected_speed,
+            ecmf=ecmf,
+            Wc=W * math.sqrt(theta) / delta,
+            corrected_work=self._cw,
+            M2=st2.M,
+            T02=T02,
+        )
+
+        # Continuation ramp. A real map at design speed asks for tens of
+        # kilonewtons and ~100 kJ/kg; applied instantaneously to one cell of a
+        # duct at rest that drives the pressure negative within a few steps.
+        # This is a numerical device for reaching steady state, not physics --
+        # it scales to 1 well before convergence and has no effect on the
+        # converged answer, which the hold test confirms.
+        self._calls += 1
+        ramp = 1.0
+        if self.ramp_evaluations > 0:
+            ramp = min(1.0, self._calls / float(self.ramp_evaluations))
+
+        q = np.zeros((3, n))
+        span = slice(self.cell, self.cell + self.n_smear)
+        q[1, span] = ramp * Fx * self._weights
+        q[2, span] = ramp * SWx * self._weights
+        return q

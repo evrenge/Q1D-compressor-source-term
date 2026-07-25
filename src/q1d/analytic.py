@@ -26,6 +26,9 @@ from dataclasses import dataclass
 
 from .gas import PerfectGas
 
+#: Standard-day reference temperature for corrected parameters.
+T_REF_STD = 288.15
+
 #: Relative slack on feasibility checks, so a state that is sonic to round-off
 #: is accepted rather than rejected. Used consistently by every feasibility
 #: test in this module.
@@ -36,6 +39,7 @@ FEASIBILITY_SLACK = 1e-12
 MAX_SUPERSONIC_MACH = 1e4
 
 __all__ = [
+    "T_REF_STD",
     "FEASIBILITY_SLACK",
     "MAX_SUPERSONIC_MACH",
     "InfeasibleOperatingPoint",
