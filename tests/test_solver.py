@@ -765,3 +765,36 @@ def test_uniform_supersonic_flow_is_preserved_through_both_boundaries():
     assert np.allclose(pp[1:-1], p_static, rtol=1e-9)
     assert np.allclose(r[1:-1], rho, rtol=1e-9)
     assert np.all(uu[1:-1] > cc[1:-1])  # still supersonic everywhere
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_well_balanced_on_a_stretched_mesh(order):
+    """Non-uniform `dx`, which `Grid.uniform` cannot produce.
+
+    Every other grid in the suite has uniform spacing, which hides bugs in any
+    expression mixing cell and face indices — mutation testing showed several
+    geometry errors surviving for exactly that reason.
+    """
+    grid = stretched_grid(n=80, ratio=1.03, area=skew_area)
+    assert grid.dx.max() / grid.dx.min() > 5.0, "mesh is not actually stretched"
+
+    solver = Solver(
+        grid,
+        GAS,
+        Transmissive(),
+        ReferenceState(rho=1.2, u=100.0, p=101325.0),
+        SolverConfig(order=order),
+    )
+    solver.set_state(rho=101325.0 / (GAS.R * 288.15), u=0.0, p=101325.0)
+    solver.cv[:, 0] = solver.cv[:, 1]
+    solver.cv[:, -1] = solver.cv[:, -2]
+    solver.p[:] = solver.p[1]
+
+    assert np.max(np.abs(solver.residual()[1])) == 0.0
+
+    # and it stays put under time marching
+    solver.set_state(rho=101325.0 / (GAS.R * 288.15), u=0.0, p=101325.0)
+    solver.run(max_steps=400)
+    _, u, p, _ = solver.primitives()
+    assert np.max(np.abs(u[1:-1])) < 1e-4
+    assert np.allclose(p[1:-1], 101325.0, rtol=1e-7)

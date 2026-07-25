@@ -454,28 +454,61 @@ Performance: **14.77 s → 5.76 s (2.6x)**. Full analysis in `BASELINE.md`.
 
 #### Findings
 
-- **CFL 2.5 is unstable.** Measured on a stagnant varying-area duct whose
-  residual starts at bitwise zero, so any growth is pure amplification rather
-  than physics: **CFL 2.44 stable, 2.46 not**. The legacy default sits past the
-  limit. This is what the `ark` coefficients predicted — Blazek's hybrid set is
-  tuned for dissipation at stages 1/3/5, and both solvers evaluate it every
-  stage. Default now 2.0; `CFL_STABILITY_LIMIT = 2.45` is pinned by a test.
-- **Two review findings withdrawn, both mine** — see §4.5 (`Fx` contains the
-  wall reaction, so `+=` on the geometric source would double-count) and §4.6
-  (`volref = 1.0` is a unit normalisation, and "fixing" it switches the limiter
-  off across shocks). The genuine limiter defect was `uref` alone.
+- **CFL is not a single number.** The limit *falls with mesh refinement* —
+  2.475 (n=40), 2.452 (80), 2.440 (160), 2.435 (320) at order 2 — and order 1
+  is far more forgiving at ~3.13. The legacy default of 2.5 is past it on every
+  mesh. Default now 2.0, verified stable at n=80/160/320 over 5000 steps.
+- **Two review findings withdrawn, both mine** — §4.5 (`Fx` contains the wall
+  reaction, so `+=` on the geometric source would double-count) and §4.6
+  (`volref = 1.0` is a unit normalisation; "fixing" it switches the limiter off
+  across shocks). The genuine limiter defect was `uref` alone.
 - **A sign error in the new boundary code**, not the legacy one: subsonic
   outflow used `J ∓ 2c_b/(γ−1)` with the sign inverted at both ends.
 - **The scheme is not strictly monotone for systems.** Density, pressure *and*
-  velocity all overshoot/undershoot at the shock foot and rarefaction head
-  (0.5%, 0.7%, 0.8% respectively). All five extrema shrink monotonically with
-  `limiter_factor`, which attributes them to the van Albada smoothness
-  parameter rather than to the Riemann solver. Bounds are measured, not chosen.
-- **Nozzle stagnation-pressure loss converges at ~3rd order** (1.10e-3, 1.16e-4,
-  1.53e-5, 1.99e-6 at n = 100…800) — numerical entropy generation through the
-  throat, not a spurious source. This matters directly for Phase 3, since the
-  compressor reads p₀ upstream of the disk; a plateau would have corrupted the
-  map lookup, and the refinement test would fail if one appeared.
+  velocity overshoot/undershoot at the shock foot and rarefaction head (0.5%,
+  0.7%, 0.8%). All five shrink monotonically with `limiter_factor`, which
+  attributes them to the van Albada smoothness parameter rather than the
+  Riemann solver. Bounds are measured, not chosen.
+- **Nozzle stagnation-pressure loss converges at ~3rd order** (1.10e-3 → 1.99e-6
+  at n = 100…800) — numerical entropy generation through the throat, not a
+  spurious source. A plateau would have corrupted the Phase 3 map lookup.
+
+#### Phase 2 audit
+
+An adversarial audit ran 63 mutations and re-derived the scheme against the
+frozen legacy. **It confirmed the numerics are the legacy numerics** — `rhs` is
+bitwise identical term by term for {constant, bump} × {order 1, 2}, the only
+intended difference being the geometric source form. It also found that
+**three of the gate's headline claims were wrong**, all of them mine:
+
+| claim | reality |
+| --- | --- |
+| "CFL 2.44 stable, 2.46 not" as a scheme property | Measured at (n=80, 400 steps), where the instability is invisible. **2.44 diverges at n=160** — it reads 4.6e-5 at 400 steps and 6.6e-2 by 5000. |
+| "well-balanced to bitwise zero" | True only for a *bitwise-uniform pressure field*. `set_state` stored `p` instead of deriving it from `cv`, so the gate measured a state the time-stepper never visits. Realised residual is 1.8e-12 (order 1) / 3.6e-12 (order 2). |
+| "1.19x faster per step" | Timed `advance()` without the `residual_norm()` that `run()` called every step. Counting it, the shipped code ran at **1.472 ms/step — slower than legacy's 1.350**. |
+
+Two test assertions were also vacuous, asserting bounds the measured quantity
+beat by six orders of magnitude, and all three equations were normalised by
+`p·A` when the energy flux scale is ~1e6 W against ~1e4 N — making a one-ulp
+energy residual look 100× worse than a one-ulp momentum one.
+
+Fixed since: `set_state` derives `p` from `cv`; the well-balancedness gate is
+split into the scheme property (bitwise, hypothesis stated) and the realised
+state (round-off, per-equation scales); CFL constants are split by order and
+documented as upper bounds needing margin; `record_every` defaults to 10;
+`run()` rejects `local_time_stepping` with `t_end` and returns converged for an
+already-stagnant field instead of silently turning a relative tolerance into an
+absolute SI one; `Grid` validates what it previously assumed; supersonic inflow
+rejects a non-supersonic imposed triple.
+
+**Coverage the audit found missing, now closed:** `rhs -= self.source(self)`
+had never executed in any test — the entire interface Phase 3 is built on — and
+no supersonic boundary branch had ever run despite being advertised above as an
+improvement over the legacy code. Both now have dedicated tests, including the
+source integral balance (`dt·Σq` exactly) that the Phase 3 tolerance rests on.
+An asymmetric area, a stretched mesh and both reconstruction orders were added
+after mutation testing showed six geometry bugs surviving because every grid
+was uniform and every area symmetric.
 
 #### Caveat carried into Phase 3
 
@@ -654,3 +687,15 @@ D10.
   but worth knowing before NASA9 arrives.
 - **Supersonic bracket is capped** at `MAX_SUPERSONIC_MACH = 1e4`; flow
   functions below ~1.5e-18 are rejected rather than solved.
+- **Mutations that still survive the suite** (from the Phase 2 audit, not yet
+  addressed): deleting the Harten entropy fix entirely changes Sod L1 by 0.001%,
+  so nothing constrains `entropy_fix` — there is no sonic-point test. Three Roe
+  average mutations (`dd = rav/rr`, swapped `uav`, `q2a = uav²`) shift Sod L1 by
+  3–4% against a 6e-3 bound that permits 200%. Two boundary mutations survive:
+  writing the ghost from interior cell 2 instead of 1, and dropping the kinetic
+  term from ghost energy. Reverse inflow is never exercised, so the inflow
+  velocity sign is unconstrained. These want a dedicated Roe-average jump
+  condition test, a sonic-point case, and a ghost-state consistency test.
+- **No positivity safeguard.** Toro test 2 (the near-vacuum "123 problem")
+  raises `NonPhysicalState` with the entropy fix on or off. Expected for a bare
+  Roe solver, but untested and unguarded.
