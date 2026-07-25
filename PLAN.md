@@ -1,6 +1,6 @@
 # Quasi-1D Euler Solver with Turbomachinery Source Terms — Development Plan
 
-Status: **Phase 2 complete, Phase 3 next**
+Status: **Phase 3 complete, Phase 4 next**
 Last updated: 2026-07-25
 
 ---
@@ -518,28 +518,51 @@ vanishes identically there. With variable area, the ~3rd-order stagnation
 pressure loss above enters, so the mesh must be fine enough to keep that term
 below the tolerance. Relevant when D8 (equal areas) is eventually relaxed.
 
-### Phase 3 — Actuator disk, ideal gas, runtime evaluation
+### Phase 3 — Actuator disk, ideal gas, runtime evaluation ✅ **complete**
 
-- `Gas` interface; `IdealGas` implementation.
-- `CompressorMap` returning `PR, η` from `Φ₁` (constant values initially).
-- Source computed at runtime from the **upstream**-sampled state.
-- Injection through the smear distribution, `n_smear = 1` by default.
+`q1d.compressor`: a `CompressorMap` protocol returning `PR` and `η` from the
+dimensionless inlet flow function `Φ₁`, and an `ActuatorDisk` that computes
+`Fx` and `SWx` **at runtime** from the locally measured upstream stagnation
+state. Nothing dimensional is tabulated — P1 realised in code.
 
-**Gate:** converged Q1D mass flow matches the 0D algebra to **≤ 1e-8 relative**
-across a matrix of ambient conditions (p₀₁, T₀₁, p_b, PR, η), plus mesh
-convergence.
+**Gate met.** The Q1D solver reproduces the closed-form 21.490742688 kg/s to
+≤1e-8, across five ambient conditions, three mesh densities (59/99/199), three
+smear widths, and a 10× hold with no drift. `T₀₂` is pinned independently of
+`p₀₂`, so a disk that ignored efficiency cannot pass: only `T₀₂` carries η, and
+the isentropic value differs by 0.564% — five orders above the gate.
 
-The tolerance is deliberately tight and is justified: at steady state the flow
-upstream and downstream of the disk is uniform, so the Roe dissipation vanishes
-identically and p₀ is preserved to machine precision; global discrete
-conservation makes the jump across the smeared region exactly (Fx, SWx); and
-Fx, SWx are constructed so that applying them to the station-1 state *produces*
-the station-2 state. Anything looser than 1e-8 indicates a real defect.
+#### The sampling standoff, measured
 
-Because the ideal-gas source terms are exactly inlet-invariant (§3.2), sweeping
-ambient conditions tests the **interface** — whether local state is measured and
-applied correctly — rather than re-testing the physics. That is precisely where
-the original defect lived.
+`PLAN.md` §7 Q1 deferred this to measurement, and the measurement mattered. The
+disk creates a **numerical boundary layer extending upstream as well as
+downstream** — an artefact of the reconstruction stencil, not physics — whose
+influence decays by ~10× every two to three cells:
+
+| offset | W error | | offset | W error |
+| --- | --- | --- | --- | --- |
+| 1 | −3.3e-04 | | 8 | +2.4e-08 |
+| 3 | −1.8e-05 | | 12 | +7.5e-11 |
+| 5 | −1.0e-06 | | 16 | +2.3e-13 |
+
+**The initial default of 3 sat inside that layer**, so the disk read
+`p₀₁ = 101318` instead of `101325` and the converged mass flow was wrong by
+1.8e-5 — the prototype's cell-52 defect (§4.2 #2) mirrored onto the upstream
+side. Default is now 12, three orders inside the gate. The unit is *cells*, not
+length, because the contamination comes from the stencil and does not shrink
+under refinement.
+
+#### Other results
+
+- **Smearing does not move the operating point.** `n_smear` of 1, 3 and 7 all
+  land on the same mass flow to 1e-8: global conservation is exact regardless
+  of how the source is distributed, so only the local profile changes. This is
+  the property that makes finite-length blade rows a parameter change (P2).
+- **The disk refuses placement where the area varies across its cells.** A
+  zero-thickness disk has one area; otherwise the momentum source carries the
+  wall reaction as well as the blade force (§4.5).
+- **A caveat inherited from Phase 2:** the 1e-8 tolerance is a constant-area
+  result. With variable area the ~3rd-order stagnation-pressure loss enters and
+  the mesh must be fine enough to keep it below tolerance.
 
 ### Phase 4 — Real gas (NASA9)
 

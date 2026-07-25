@@ -224,12 +224,19 @@ def test_smearing_spreads_the_source_but_conserves_its_total():
 
 
 def test_disk_rejects_a_varying_area_placement():
-    """A zero-thickness disk has one area; see PLAN.md §4.5."""
+    """A zero-thickness disk has one area; see PLAN.md §4.5.
 
-    def bump(x):
-        return 0.1 - 0.02 * np.exp(-(((x - 0.5) / 0.2) ** 2))
+    A *monotone taper* is used deliberately. An earlier version of this test
+    put the disk at cell 49 of a symmetric bump on a 99-cell mesh — which is
+    the apex, where dA/dx = 0 and the two faces straddling the disk have equal
+    area by symmetry. The check correctly did not fire, and the test failed for
+    a reason that had nothing to do with the code.
+    """
 
-    grid = Grid.uniform(0.0, 1.0, 99, bump)
+    def taper(x):
+        return 0.1 - 0.02 * x
+
+    grid = Grid.uniform(0.0, 1.0, 99, taper)
     bc = StagnationInletStaticOutlet(p0_in=P01, T0_in=T01, p_back=PB)
     disk = ActuatorDisk(cell=49, compressor_map=ConstantCompressorMap(PR, ETA))
     solver = Solver(grid, GAS, bc, ReferenceState(1.2, 176.0, P01), source=disk)
