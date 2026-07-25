@@ -21,7 +21,7 @@ from q1d.analytic import mach_from_flow_function, static_from_stagnation
 from q1d.boundary import StagnationInletStaticOutlet, Transmissive
 from q1d.gas import AIR_LEGACY, PerfectGas
 from q1d.grid import Grid
-from q1d.riemann import SOD_LEFT, SOD_RIGHT, sample_profile
+from q1d.riemann import SOD_LEFT, SOD_RIGHT, RiemannState, sample_profile
 from q1d.solver import (
     CFL_STABILITY_LIMIT_ORDER2,
     NonPhysicalState,
@@ -134,9 +134,6 @@ def test_stagnant_field_has_exactly_zero_residual(order, area):
     assert np.max(np.abs(residual[1])) == 0.0, (
         f"max |momentum residual| = {np.max(np.abs(residual[1])):.3e}"
     )
-    # Mass and energy cannot be bitwise zero when the area varies: recovering
-    # rho = (rho*A)/A is not an exact round trip, so the initial field itself
-    # is non-uniform at the ulp level. They must sit at round-off.
     # Mass and energy are a *different* hypothesis: they involve the
     # reconstructed density, and rho = (rho0*A)/A is not bitwise uniform for an
     # arbitrary area law (2.1e-16 on the skew grid). Well-balancedness proper
@@ -798,3 +795,100 @@ def test_well_balanced_on_a_stretched_mesh(order):
     _, u, p, _ = solver.primitives()
     assert np.max(np.abs(u[1:-1])) < 1e-4
     assert np.allclose(p[1:-1], 101325.0, rtol=1e-7)
+
+
+# ===========================================================================
+# The Harten entropy fix
+# ===========================================================================
+
+#: Transonic rarefaction: `u - c` runs from -0.433 to +0.300 through the fan,
+#: so the sonic point lies inside it. Sod does NOT have this property -- its
+#: `u - c` goes from -1.183 to -0.070 and never crosses zero -- which is why
+#: the entire suite could pass with the entropy fix deleted.
+TRANSONIC_LEFT = RiemannState(rho=1.0, u=0.75, p=1.0)
+TRANSONIC_RIGHT = RiemannState(rho=0.125, u=0.0, p=0.1)
+TRANSONIC_X0 = 0.3
+
+
+def _sonic_point_error(n, entropy_fix, order=1, t_end=0.2):
+    """Max density error in the cells straddling the sonic point."""
+    grid = Grid.uniform(0.0, 1.0, n, 1.0)
+    x = grid.x_cell
+    solver = Solver(
+        grid,
+        SOD_GAS,
+        Transmissive(),
+        ReferenceState(rho=1.0, u=1.0, p=1.0),
+        SolverConfig(cfl=0.8, order=order, entropy_fix=entropy_fix),
+    )
+    solver.set_state(
+        rho=np.where(x < TRANSONIC_X0, TRANSONIC_LEFT.rho, TRANSONIC_RIGHT.rho),
+        u=np.where(x < TRANSONIC_X0, TRANSONIC_LEFT.u, TRANSONIC_RIGHT.u),
+        p=np.where(x < TRANSONIC_X0, TRANSONIC_LEFT.p, TRANSONIC_RIGHT.p),
+    )
+    solver.run(max_steps=20_000, t_end=t_end)
+    rho, _, _, _ = solver.primitives()
+    exact, _, _ = sample_profile(
+        x, t_end, TRANSONIC_LEFT, TRANSONIC_RIGHT, SOD_GAS, x0=TRANSONIC_X0
+    )
+    near = np.abs(x - TRANSONIC_X0) < 0.03  # the sonic point sits at x/t = 0
+    return float(np.max(np.abs(rho[1:-1][near] - exact[near])))
+
+
+def test_entropy_fix_prevents_an_entropy_violating_expansion_shock():
+    """Without it the sonic-point error stops converging under refinement.
+
+    At a sonic point the `u - c` eigenvalue vanishes, so the Roe dissipation for
+    that wave vanishes with it and the scheme admits a stationary expansion
+    shock -- an entropy-violating weak solution. The Harten fix floors the
+    eigenvalue and removes it.
+
+    Nothing in this suite exercised that until now: Sod has no sonic point (its
+    `u - c` never changes sign), so deleting the entropy fix altogether moved
+    Sod's L1 error by 0.001% and every test still passed. This test uses a
+    genuinely transonic rarefaction instead.
+
+    First order is used deliberately: at second order the MUSCL reconstruction
+    masks most of the effect (1.22x rather than 4.8x), which is exactly why the
+    default configuration hid it.
+    """
+    with_fix = (_sonic_point_error(100, 0.05), _sonic_point_error(400, 0.05))
+    without = (_sonic_point_error(100, 0.0), _sonic_point_error(400, 0.0))
+
+    # with the fix, refining the mesh reduces the error
+    assert with_fix[1] < 0.5 * with_fix[0], f"expected convergence, got {with_fix}"
+    # without it, refining does not help -- the expansion shock does not vanish
+    assert without[1] > 0.8 * without[0], f"expected stagnation, got {without}"
+    # and at the finer mesh the difference is several-fold
+    assert without[1] > 3.0 * with_fix[1], f"fix={with_fix[1]:.3e} nofix={without[1]:.3e}"
+
+
+def test_entropy_fix_is_inactive_where_there_is_no_sonic_point():
+    """Documents why Sod could never have caught this.
+
+    The fix should do almost nothing on a problem whose rarefaction is entirely
+    subsonic or entirely supersonic -- and that is precisely Sod.
+    """
+    errors = []
+    for entropy_fix in (0.0, 0.05, 0.2):
+        grid = Grid.uniform(0.0, 1.0, 200, 1.0)
+        x = grid.x_cell
+        solver = Solver(
+            grid,
+            SOD_GAS,
+            Transmissive(),
+            ReferenceState(rho=1.0, u=1.0, p=1.0),
+            SolverConfig(cfl=0.8, order=2, entropy_fix=entropy_fix),
+        )
+        solver.set_state(
+            rho=np.where(x < 0.5, SOD_LEFT.rho, SOD_RIGHT.rho),
+            u=np.where(x < 0.5, SOD_LEFT.u, SOD_RIGHT.u),
+            p=np.where(x < 0.5, SOD_LEFT.p, SOD_RIGHT.p),
+        )
+        solver.run(max_steps=20_000, t_end=0.2)
+        rho, _, _, _ = solver.primitives()
+        exact, _, _ = sample_profile(x, 0.2, SOD_LEFT, SOD_RIGHT, SOD_GAS)
+        errors.append(float(np.mean(np.abs(rho[1:-1] - exact))))
+
+    spread = (max(errors) - min(errors)) / min(errors)
+    assert spread < 0.05, f"entropy_fix should barely matter on Sod, spread {spread:.3f}"

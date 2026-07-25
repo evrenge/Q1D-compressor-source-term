@@ -688,8 +688,10 @@ D10.
 - **Supersonic bracket is capped** at `MAX_SUPERSONIC_MACH = 1e4`; flow
   functions below ~1.5e-18 are rejected rather than solved.
 - **Mutations that still survive the suite** (from the Phase 2 audit, not yet
-  addressed): deleting the Harten entropy fix entirely changes Sod L1 by 0.001%,
-  so nothing constrains `entropy_fix` — there is no sonic-point test. Three Roe
+  addressed). *These describe gaps in the TEST SUITE, found by deliberately
+  breaking a throwaway copy of the code to see whether the tests notice. The
+  solver itself is unmodified — in particular the Harten entropy fix is present
+  and unchanged, as it has been throughout.* Three Roe
   average mutations (`dd = rav/rr`, swapped `uav`, `q2a = uav²`) shift Sod L1 by
   3–4% against a 6e-3 bound that permits 200%. Two boundary mutations survive:
   writing the ghost from interior cell 2 instead of 1, and dropping the kinetic
