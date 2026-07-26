@@ -599,6 +599,65 @@ mass flow with 1e-12 drift, at five speeds on `SubsonicCompressor` and two on
 `TranssonicCompressor` (`docs/phase5_ecmf_map.png`). Above the gain-one boundary
 it does not, and the cause is **not settled**. See §8.
 
+### 3.10 The map was never the problem
+
+Everything in §3.9 — the ECMF circularity, the loop gain, `Z`, the β lag, the
+map-end clamp — is about the *map*. A control that removes the map entirely
+settles it.
+
+**Constant map, closed-form reference, no lookup, no β, no coordinate choice.**
+`ConstantCompressorMap` with the Phase 3 actuator disk, 401 cells, 21-cell
+smear, checked against `zero_d_compressor`:
+
+| PR | 1.20 | 1.40 | 1.60 | 1.80 | 2.00 | 2.20 | 2.50 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `Fhat = Fx/(p₁A)` | 0.213 | 0.430 | 0.651 | 0.873 | 1.096 | 1.321 | 1.659 |
+| W error | **1.9e-10** | 9.5e-03 | 3.2e-02 | 3.8e-03 | 1.9e-02 | blew up | blew up |
+| disturbance envelope | ×0.0014 | ×29.7 | — | — | — | — | — |
+
+**The limit is between PR 1.2 and 1.4.** Phase 3 passed its 1e-8 gate at
+PR = 1.2 and four phases were built on top of that without the disk ever being
+tested above it. Real maps need 1.5–2.5, and radial machines reach 14.
+
+Ruled out on this clean case: CFL (1.5, 0.8, 0.4, 0.2 all fail, so it is not
+explicit-source stiffness and point-implicit is not the fix).
+
+**The mechanism, and an error running through all of §3.9.** Every `Z` in this
+document was computed by perturbing `W` with `T₀₁` and `p₀₁` held fixed. An
+acoustic wave does not do that — it changes density, velocity and pressure
+together. The disk sets `p₀₂ = PR·p₀₁` from a pressure it *measures*, so a wave
+arriving at the sampling station raises `p₀₁`, raises `Fx`, and launches a
+stronger wave. For a left-running wave (`δp = −ρcδu`, `δρ = δp/c²`) that path
+contributes a term of size `Fx/(p₀₁A)` — the source strength itself — which a
+W-only perturbation cannot see at all.
+
+Recomputed along the characteristic:
+
+| PR | 1.20 | 1.40 | 1.80 | 2.20 | 2.50 |
+| --- | --- | --- | --- | --- | --- |
+| `Z` (W only) | 0.064 | 0.107 | 0.166 | 0.204 | 0.226 |
+| **`Z` acoustic** | **0.301** | **0.577** | 1.091 | 1.580 | 1.937 |
+| verdict | held | not | not | blew up | blew up |
+
+`Z` (W only) spans 0.06–0.23 across cases running from exact to divergent, and
+against its own 0.82 threshold would call *all* of them stable. `Z` acoustic
+orders them correctly and scores 97.5% on the 160-case map sweep against 96.4%.
+
+**Not yet a calibrated criterion.** The constant-map set used a 21-cell smear
+and the map sweep 81, and smear is worth 35–73× (§3.9), so the thresholds
+(0.3–0.6 against 1.66) are not comparable. The physics is consistent; the
+calibration is not, and no single number should be quoted until they are run at
+matched smear.
+
+**Consequence for the plan.** The failure is not in the map layer, so no map-side
+remedy can fix it: not the closure, not the coordinate, not the lag, not
+densification. Phase 5's stated blocker in §8 is wrong and is corrected there.
+The next work is on the actuator-disk source itself — specifically that a single
+total force computed from one remote station is applied uniformly across the
+row, so the whole row responds in unison to one measurement. A distributed
+source whose density responds to the *local* state in each cell is the
+reformulation to test.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -1156,7 +1215,12 @@ D10.
 
 ## 8. Known gaps
 
-- **Phase 5 stops at `Z = |dFx/dW|/c ≈ 1`.** Below it a real map is held to
+- **The actuator-disk source fails above PR ≈ 1.3, independently of any map**
+  (§3.10). A constant-PR disk with a closed-form reference holds to 1.9e-10 at
+  PR 1.2 and diverges at 1.4, blowing up by 2.2. Everything below about the map
+  is downstream of this and much of it is moot; it is retained because the
+  measurements are sound even where the diagnosis was not.
+- ~~**Phase 5 stops at `Z = |dFx/dW|/c ≈ 1`.**~~ **Superseded by §3.10.** Below it a real map is held to
   1e-11 in mass flow with 1e-12 drift; above it the operating point is not held
   at any mesh from 201 to 1601 cells, at any smear from 1.3% to 20% of the duct,
   at any standoff from 0.12% to 3%, or with any remedy tried (§3.9). On
