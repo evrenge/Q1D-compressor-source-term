@@ -718,6 +718,54 @@ and four phases were built on top of it. Everything in §3.9 — closures,
 coordinates, loop gains, `Z`, densification, β lags — was chasing consequences
 of that in the map layer, where the cause never was.
 
+### 3.12 The fix: lag the inlet state the source reads
+
+§3.11 gives the specification — track inlet conditions on a slow timescale, not
+at acoustic frequencies. `compressor.InletFilter` is a first-order lag on the
+measured `(T₀₁, p₀₁)`, applied by `ActuatorDisk` and `InletFlowCompressor` via
+`inlet_lag` (seconds, default 0 = off). `W` stays instantaneous.
+
+Constant PR, legacy geometry, closed-form reference. W error:
+
+| PR | no lag | τ=1e-4 | τ=1e-3 | τ=3e-3 | τ=1e-2 | τ=3e-2 | τ=1e-1 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.4 | −6.1e-03 | 2.4e-02 | **2.04e-10** | **2.05e-10** | **2.05e-10** | **2.05e-10** | **2.05e-10** |
+| 1.6 | −1.0e-01 | −8.4e-03 | −7.5e-08 | **2.00e-10** | **2.16e-10** | **2.04e-10** | **2.02e-10** |
+| 2.0 | blew up | blew up | −1.2e-01 | +5.3e-02 | — | −2.4e-02 | −4.1e-02 |
+| 2.5 | blew up | blew up | +3.6e-02 | +1.3e-01 | −1.6e-02 | −5.3e-03 | +1.7e-02 |
+
+**What it fixes.** PR 1.4 and 1.6 now hold to 2e-10, the same accuracy the disk
+reaches at 1.2. The usable range moves from PR < 1.3 to **PR ≤ 1.6**.
+
+**What it does not.** PR 2.0 and 2.5 no longer *diverge* — a real improvement,
+from blow-up to a bounded 1–5% oscillation — but they do not hold. A second
+mechanism acts above ~1.7 and is not diagnosed. Radial machines reach PR 14, so
+this is a step, not a solution.
+
+**Why it is a stability device and not a fudge.** The lag has unit DC gain, so
+the converged answer cannot depend on `τ`. Measured, not assumed: at PR 1.4 the
+W error is 2.044e-10, 2.050e-10, 2.050e-10, 2.049e-10, 2.047e-10 across a
+hundredfold range of `τ`, and `tests/test_compressor.py` pins that invariance
+alongside the PR 1.2 point being undisturbed.
+
+**Choosing τ.** The blade row's own through-flow time (~7e-5 s here) is far too
+short — τ=1e-4 fails at every PR. One rotor revolution works: `rotor_period(rpm)
+= 60/rpm` gives 6e-3 s at 10,000 rpm, comfortably inside the range that holds.
+This is the author's `1/N` suggestion and needs no data the maps do not carry.
+τ must not be tuned for stability: it is a transient-response parameter and
+transient response is what the project exists to model.
+
+**A start-up interaction, measured.** The Phase 3 default duct sits at
+`M₁ = 0.665`, 11% from inlet choke. The lag slows the source's response enough
+that starting from a *uniform* field overshoots into choke. Either margin
+(`M₁ = 0.45`) or a steady seed avoids it; the regression tests use both.
+
+**The gate that was missing.** `TestHighPressureRatio` now checks 1.4 and 1.6
+with and without the lag, and asserts the unlagged case *fails* — so if this
+regression ever silently repairs itself, the test says so rather than passing
+quietly. Phase 3's single check at PR 1.2 is what let four phases build on a
+defect.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -1275,10 +1323,11 @@ D10.
 
 ## 8. Known gaps
 
-- **Phase 3's runtime source evaluation is a regression against the prototype**
-  at PR ≥ 1.4 (§3.11), and the prototype's frozen-table bug was what suppressed
-  it. The fix is specified (lag the measured inlet stagnation state on the
-  flow-through timescale) but not yet built or sized.
+- **Fixed to PR 1.6, not beyond.** The inlet lag (§3.12) restores 2e-10 at PR
+  1.4 and 1.6 and converts divergence into a bounded 1–5% oscillation at 2.0 and
+  2.5. A second mechanism acts above ~1.7 and is **not diagnosed**. Radial
+  machines reach PR 14, so the disk is still far short of the range the maps
+  need, and nothing above PR 1.6 should be reported as working.
 - **The actuator-disk source fails above PR ≈ 1.3, independently of any map**
   (§3.10). A constant-PR disk with a closed-form reference holds to 1.9e-10 at
   PR 1.2 and diverges at 1.4, blowing up by 2.2. Everything below about the map

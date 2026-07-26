@@ -41,7 +41,99 @@ __all__ = [
     "MappedDiskState",
     "InletFlowCompressor",
     "UnsteadyMappedCompressor",
+    "InletFilter",
+    "rotor_period",
 ]
+
+
+@dataclass
+class InletFilter:
+    """First-order lag on the inlet stagnation state a source term reads.
+
+    **Why this exists.** The prototype tabulated ``Fx`` once at its design inlet
+    state, which is the systematic error this project was built to remove — a
+    table in newtons is only valid at the condition it was generated at. Phase 3
+    replaced it with runtime evaluation from the locally measured state, which is
+    correct for varying inlet conditions and which also opened an acoustic
+    feedback loop (``PLAN.md`` §3.11):
+
+        a wave raises ``p01`` at the sampling station
+          → ``Fx ≈ (PR·p01 − p1)·A`` rises
+          → a stronger wave is launched,     loop gain ≈ ``Fx/(p01·A)``
+
+    The gain grows with pressure ratio, so the disk holds its point at PR 1.2
+    and fails from 1.4 — the prototype's bug had been suppressing it, and Phase
+    3's gate at 1.2 sat just inside the stable region.
+
+    The filter tracks genuine inlet changes but not the disk's own echo. It has
+    **unit DC gain**, so the converged answer does not depend on ``tau``:
+    measured on the constant-PR case at PR 1.4, W error is 2.044e-10, 2.050e-10,
+    2.050e-10, 2.049e-10 and 2.047e-10 at ``tau`` = 1e-3, 3e-3, 1e-2, 3e-2 and
+    1e-1 s — invariant over a hundredfold range, against −6.1e-03 unfiltered.
+
+    **Choosing tau.** It must exceed the acoustic transit of the disk's
+    surroundings; the blade row's own through-flow time (~7e-5 s here) is far too
+    short and does not work. A rotor period, ``tau ≈ 1/N``, does: 1e-3 s is about
+    a sixth of a revolution at 10,000 rpm and is what the measurements above
+    used. :func:`rotor_period` derives it when the shaft speed is known.
+
+    ``tau = 0`` disables the filter and restores the unfiltered behaviour, which
+    is correct only below PR ≈ 1.3.
+    """
+
+    tau: float = 0.0
+
+    _T0: float = field(init=False, repr=False, default=math.nan)
+    _p0: float = field(init=False, repr=False, default=math.nan)
+    _t: float = field(init=False, repr=False, default=math.nan)
+
+    def __post_init__(self) -> None:
+        if self.tau < 0.0:
+            raise ValueError(f"inlet filter tau must be non-negative, got {self.tau!r}")
+
+    @property
+    def state(self) -> tuple[float, float]:
+        """The filtered ``(T0, p0)`` currently in use."""
+        return self._T0, self._p0
+
+    def reset(self) -> None:
+        self._T0 = self._p0 = self._t = math.nan
+
+    def update(self, t: float, T0: float, p0: float) -> tuple[float, float]:
+        """Advance the filter to time ``t`` and return the state to use.
+
+        Advances **once per step**, not once per Runge-Kutta stage: the solver
+        calls a source term at every stage, and integrating the filter at each
+        of them would run it at five times the physical rate. ``Solver.advance``
+        owns the clock, so a stage repeat is detected by ``t`` not having moved.
+
+        The first call seeds the filter with the measured state, so starting
+        from a converged field is not disturbed.
+        """
+        if self.tau <= 0.0:
+            return T0, p0
+        if math.isnan(self._T0):
+            self._T0, self._p0, self._t = T0, p0, t
+        elif t > self._t:
+            alpha = 1.0 - math.exp(-(t - self._t) / self.tau)
+            self._t = t
+            self._T0 += alpha * (T0 - self._T0)
+            self._p0 += alpha * (p0 - self._p0)
+        return self._T0, self._p0
+
+
+def rotor_period(rpm: float) -> float:
+    """``tau = 1/N`` in seconds — a defensible blade-row response time.
+
+    The row's own through-flow time is too short to break the acoustic loop
+    (``PLAN.md`` §3.11); one shaft revolution is the next physical scale up and
+    is long enough. Use it when the design speed is known rather than tuning
+    ``tau`` until the tests pass — ``tau`` is a transient-response parameter and
+    the project exists to model transients.
+    """
+    if rpm <= 0.0:
+        raise ValueError(f"rpm must be positive, got {rpm!r}")
+    return 60.0 / rpm
 
 
 class CompressorMap(Protocol):
@@ -136,11 +228,14 @@ class ActuatorDisk:
     compressor_map: CompressorMap
     sample_offset: int = 12
     n_smear: int = 1
+    inlet_lag: float = 0.0
     last: DiskState = field(default_factory=DiskState)
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
+    _filter: InletFilter = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
+        self._filter = InletFilter(self.inlet_lag)
         if self.n_smear < 1:
             raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
         if self.sample_offset < 1:
@@ -195,6 +290,10 @@ class ActuatorDisk:
         T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
         p01 = p_i * (T01 / T) ** gas.g_over_gm1
         W = rho_i * u_i * float(grid.a_cell[i])
+
+        # The blade row tracks its inlet condition, not its own acoustic echo
+        # (PLAN.md 3.11). Unit DC gain, so the converged answer is unchanged.
+        T01, p01 = self._filter.update(solver.t, T01, p01)
 
         phi1 = W * math.sqrt(gas.R * T01) / (area * p01)
         phi_max = max_flow_function(gas)
@@ -421,14 +520,17 @@ class InletFlowCompressor:
     corrected_speed: float
     sample_offset: int = 12
     n_smear: int = 1
+    inlet_lag: float = 0.0
     ramp_evaluations: int = 0
     last: MappedDiskState = field(default_factory=MappedDiskState)
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
+    _filter: InletFilter = field(init=False, repr=False, default=None)
     _calls: int = field(init=False, repr=False, default=0)
     _reversals: int = field(init=False, repr=False, default=0)
 
     def __post_init__(self) -> None:
+        self._filter = InletFilter(self.inlet_lag)
         if self.n_smear < 1:
             raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
         if self.sample_offset < 1:
@@ -478,6 +580,7 @@ class InletFlowCompressor:
             self.last = MappedDiskState(W=W, T01=T01, p01=p01)
             return np.zeros((3, n))
 
+        T01, p01 = self._filter.update(solver.t, T01, p01)
         theta, delta = T01 / T_REF, p01 / P_REF
         Wc = W * math.sqrt(theta) / delta
         point = self.beta_map.evaluate_at_Wc(Wc, self.corrected_speed)

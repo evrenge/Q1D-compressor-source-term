@@ -11,12 +11,19 @@ produce the right pressure rise — so a test that checked only ``p02`` would
 pass on an isentropic disk, which is exactly the failure P1 exists to prevent.
 """
 
+import math
+
 import numpy as np
 import pytest
 
 from q1d.analytic import zero_d_compressor
 from q1d.boundary import StagnationInletStaticOutlet
-from q1d.compressor import ActuatorDisk, ConstantCompressorMap
+from q1d.compressor import (
+    ActuatorDisk,
+    ConstantCompressorMap,
+    InletFilter,
+    rotor_period,
+)
 from q1d.gas import AIR_LEGACY
 from q1d.grid import Grid
 from q1d.solver import ReferenceState, Solver, SolverConfig
@@ -37,6 +44,7 @@ def build(
     sample_offset=12,
     area=AREA,
     cfl=2.0,
+    inlet_lag=0.0,
 ):
     """Duct with a compressor disk at mid-length, initialised at the 0D answer."""
     exact = zero_d_compressor(p01, T01, pb, pr, eta, area, area, GAS)
@@ -48,6 +56,7 @@ def build(
         compressor_map=ConstantCompressorMap(pr, eta),
         sample_offset=sample_offset,
         n_smear=n_smear,
+        inlet_lag=inlet_lag,
     )
     solver = Solver(grid, GAS, bc, reference, SolverConfig(cfl=cfl), source=disk)
     # start from the exact upstream state everywhere; the disk builds the rest
@@ -270,3 +279,194 @@ def test_source_is_zero_for_a_unity_pressure_ratio():
     # Fx is not identically zero -- with PR = 1 the static states still differ
     # only by round-off, so it is tiny but not exactly zero
     assert abs(disk.last.Fx) < 1e-6
+
+
+# -- the inlet filter (PLAN.md 3.11) ----------------------------------------
+
+
+class TestInletFilter:
+    """The lag that stops the disk responding to its own acoustic echo."""
+
+    def test_zero_tau_is_a_pass_through(self):
+        f = InletFilter(0.0)
+        for t in (0.0, 1.0, 2.0):
+            assert f.update(t, 300.0, 2.0e5) == (300.0, 2.0e5)
+
+    def test_negative_tau_is_rejected(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            InletFilter(-1.0)
+
+    def test_first_call_seeds_from_the_measurement(self):
+        """A converged seed must not be disturbed by switching the filter on."""
+        f = InletFilter(1e-3)
+        assert f.update(0.0, 300.0, 2.0e5) == (300.0, 2.0e5)
+
+    def test_unit_dc_gain(self):
+        """A held input must be tracked exactly — this is why tau cannot bias
+        the converged answer, and it is the property that makes the filter a
+        stability device rather than a fudge factor."""
+        f = InletFilter(1e-3)
+        f.update(0.0, 300.0, 2.0e5)
+        t = 0.0
+        for _ in range(20000):
+            t += 1e-6
+            T0, p0 = f.update(t, 310.0, 2.2e5)
+        assert T0 == pytest.approx(310.0, rel=1e-8)
+        assert p0 == pytest.approx(2.2e5, rel=1e-8)
+
+    def test_advances_once_per_step_not_once_per_stage(self):
+        """The solver calls a source at every RK stage; integrating the filter
+        at each would run it at five times the physical rate."""
+        f = InletFilter(1e-3)
+        f.update(0.0, 300.0, 2.0e5)
+        once = f.update(1e-4, 310.0, 2.2e5)
+        for _ in range(4):  # four more stages at the same time
+            again = f.update(1e-4, 310.0, 2.2e5)
+        assert again == once
+
+    def test_approaches_a_step_at_the_stated_rate(self):
+        """After one tau the response is 1 - 1/e of the step."""
+        f = InletFilter(1e-3)
+        f.update(0.0, 300.0, 1.0e5)
+        T0, p0 = f.update(1e-3, 400.0, 2.0e5)
+        assert T0 == pytest.approx(300.0 + 100.0 * (1 - math.exp(-1.0)), rel=1e-12)
+        assert p0 == pytest.approx(1.0e5 + 1.0e5 * (1 - math.exp(-1.0)), rel=1e-12)
+
+    def test_reset_forgets_the_state(self):
+        f = InletFilter(1e-3)
+        f.update(0.0, 300.0, 2.0e5)
+        f.update(1e-3, 400.0, 3.0e5)
+        f.reset()
+        assert f.update(2e-3, 350.0, 2.5e5) == (350.0, 2.5e5)
+
+
+class TestRotorPeriod:
+    def test_matches_one_revolution(self):
+        assert rotor_period(60.0) == pytest.approx(1.0)
+        assert rotor_period(10_000.0) == pytest.approx(6e-3)
+
+    def test_rejects_non_positive(self):
+        for rpm in (0.0, -100.0):
+            with pytest.raises(ValueError, match="rpm must be positive"):
+                rotor_period(rpm)
+
+
+class TestDiskInletLagIsWiredIn:
+    def test_disk_defaults_to_no_lag(self):
+        d = ActuatorDisk(cell=50, compressor_map=ConstantCompressorMap(1.2, 0.9))
+        assert d.inlet_lag == 0.0
+        assert d._filter.tau == 0.0
+
+    def test_disk_accepts_a_lag(self):
+        d = ActuatorDisk(cell=50, compressor_map=ConstantCompressorMap(1.2, 0.9), inlet_lag=1e-3)
+        assert d._filter.tau == 1e-3
+
+
+class TestHighPressureRatio:
+    """The gate that was missing, and that let a regression through four phases.
+
+    Phase 3 checked one pressure ratio, 1.2, which happens to sit just inside
+    the stable region. The disk fails from 1.4 (``PLAN.md`` §3.10) because
+    runtime evaluation from the locally measured inlet state closes an acoustic
+    loop of gain ``Fx/(p01 A)`` — the prototype's frozen source table had been
+    suppressing it, and removing that bug exposed it (§3.11).
+
+    Real maps need PR 1.5–2.5 and radial machines reach 14, so a gate at a
+    single benign pressure ratio was never a gate.
+
+    These cases are sized at ``M1 = 0.45`` and seeded with the exact discrete
+    steady profile. The Phase 3 default sits at ``M1 = 0.665``, 11% from choke,
+    and the lag slows the source's response enough that a start from a uniform
+    field overshoots into it — a real interaction, and the reason a startup
+    transient wants either margin or a steady seed.
+    """
+
+    MACH = 0.45
+
+    @classmethod
+    def _case(cls, pr, inlet_lag, eta=ETA, n=99, n_smear=1, cfl=2.0):
+        from q1d.analytic import (
+            compressor_exit_stagnation,
+            flow_function,
+            state_from_flux,
+            static_from_stagnation,
+        )
+
+        A = AREA
+        W = flow_function(cls.MACH, GAS) * A * P01 / math.sqrt(GAS.R * T01)
+        T02, p02 = compressor_exit_stagnation(T01, P01, pr, eta, GAS)
+        st1 = static_from_stagnation(T01, P01, W, A, GAS)
+        st2 = static_from_stagnation(T02, p02, W, A, GAS)
+        exact = zero_d_compressor(P01, T01, st2.p, pr, eta, A, A, GAS)
+
+        grid = Grid.uniform(0.0, 1.0, n, A)
+        cell = (n - n_smear) // 2
+        bc = StagnationInletStaticOutlet(p0_in=P01, T0_in=T01, p_back=st2.p)
+        reference = ReferenceState(rho=st1.rho, u=st1.u, p=P01)
+        disk = ActuatorDisk(
+            cell=cell,
+            compressor_map=ConstantCompressorMap(pr, eta),
+            sample_offset=12,
+            n_smear=n_smear,
+            inlet_lag=inlet_lag,
+        )
+        solver = Solver(grid, GAS, bc, reference, SolverConfig(cfl=cfl), source=disk)
+
+        Fx = (st2.p - st1.p) * A + W * (st2.u - st1.u)
+        SWx = W * GAS.cp * (T02 - T01)
+        rho = np.empty(n)
+        u = np.empty(n)
+        pr_ = np.empty(n)
+        rho[:cell], u[:cell], pr_[:cell] = st1.rho, st1.u, st1.p
+        rho[cell + n_smear :] = st2.rho
+        u[cell + n_smear :] = st2.u
+        pr_[cell + n_smear :] = st2.p
+        F = np.array(
+            [
+                st1.rho * st1.u * A,
+                (st1.rho * st1.u**2 + st1.p) * A,
+                st1.rho * st1.u * (GAS.cp * st1.T + 0.5 * st1.u**2) * A,
+            ]
+        )
+        q = np.array([0.0, Fx, SWx]) / n_smear
+        for k in range(n_smear):
+            x = state_from_flux(F + 0.5 * q, A, GAS)
+            rho[cell + k], u[cell + k], pr_[cell + k] = x.rho, x.u, x.p
+            F = F + q
+        solver.set_state(rho, u, pr_)
+        return solver, disk, exact
+
+    @pytest.mark.parametrize("pr", [1.4, 1.6])
+    def test_the_inlet_lag_recovers_the_operating_point(self, pr):
+        """With the lag the disk lands on the closed-form answer; without it
+        the same case misses by orders of magnitude."""
+        solver, disk, exact = self._case(pr, inlet_lag=3e-3)
+        solver.run(max_steps=60_000, tol=1e-13)
+        assert disk.last.W == pytest.approx(exact.W, rel=1e-6)
+
+        bare, bare_disk, _ = self._case(pr, inlet_lag=0.0)
+        try:
+            bare.run(max_steps=60_000, tol=1e-13)
+            unlagged = abs(bare_disk.last.W / exact.W - 1.0)
+        except Exception:  # noqa: BLE001 - divergence is the point
+            unlagged = float("inf")
+        assert unlagged > 1e-5, (
+            "the unlagged disk is expected to miss the point at this pressure "
+            "ratio; if it now holds, this regression test has lost its teeth"
+        )
+
+    def test_the_lag_does_not_move_the_converged_answer(self):
+        """Unit DC gain: the same point, whatever tau. This is what separates a
+        stability device from a fudge factor."""
+        answers = []
+        for tau in (3e-3, 3e-2):
+            solver, disk, exact = self._case(1.4, inlet_lag=tau)
+            solver.run(max_steps=60_000, tol=1e-13)
+            answers.append(disk.last.W / exact.W - 1.0)
+        assert answers[0] == pytest.approx(answers[1], abs=1e-8)
+
+    def test_the_phase_three_point_is_unchanged_by_the_lag(self):
+        """PR 1.2 already held; switching the filter on must not disturb it."""
+        solver, disk, exact = self._case(1.2, inlet_lag=3e-3)
+        solver.run(max_steps=60_000, tol=1e-13)
+        assert disk.last.W == pytest.approx(exact.W, rel=1e-8)
