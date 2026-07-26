@@ -1133,21 +1133,84 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
-**What is not fixed.** Above PR ≈ 2.4 the runs survive but settle into a
-**limit cycle** rather than the design point: at `HPC01` Nc 0.8 the mass flow
-oscillates ±7e−3 with a period near 0.16 s, steady in amplitude over 40,000
-steps. The linearisation says −38.96, so this is not the same instability; it is
-nonlinear and it is not yet explained. Two candidates, both open:
+### 3.19 The residual limit cycle is the ICMF conditioning problem, not the closure
 
-* the linearisation freezes `LocalLevelFilter` along with everything else, so it
-  is the `τ_level → ∞` limit and says nothing about the level filter's own
-  dynamics. A first attempt to put those states into the eigenvalue problem
-  disagreed with the validated frozen limit (+37.0 against −38.96 at Nc 0.8) and
-  is therefore **wrong**; its numbers are not recorded here.
-* **map-end clamping.** At Nc 0.9 the trace shows `beta` hitting exactly 0.0000
-  with `PR` pinned at the speed line's end value 4.6161, repeatedly. That is a
-  non-smooth bound, and non-smooth bounds sustain limit cycles. It is also the
-  original "suspect 1", reappearing for a different reason.
+With the scaling in place, `HPC01` at Nc 0.7 (PR 3.104) converges to a mean
+offset of **+6.27e−11** with 1.02e−07 peak-to-peak. Nc 0.8 does not: it settles
+into a sustained oscillation of ±8e−3 in mass flow. Since the linearisation
+there is −38.96, the cycle is nonlinear, and four hypotheses were tested and
+killed before the right one:
+
+| hypothesis | test | result |
+| --- | --- | --- |
+| filter dynamics set the period | sweep `τ` | period 2.95e−3 s, **0.29 τ** — not the filter |
+| duct resonance, exit reflection | absorbing outlet, σ = 0.2, 0.5 | 1.65e−02, 1.69e−02 against 1.63e−02 — no effect |
+| duct resonance, inlet reflection | absorbing inlet, σ = 0.2 | 1.63e−02 — **no effect at all** |
+| constant area starves the exit | contract to `M2` = 0.30 (`A2/A1` = 0.404) | 1.94e−02 — slightly *worse* |
+
+The period does match `2 × 0.5 / 340 = 2.9e−3 s`, the acoustic round trip of the
+half-duct between inlet and disk, but making either end absorbing changes
+nothing, so the resonance is a symptom and not the driver.
+
+**What it actually is: the design point sat next to choke.** Every rig here
+designs at the midpoint of the speed line's *ECMF* range, and ECMF is a strongly
+nonlinear function of `Wc`, so the two midpoints are not the same point. At
+Nc 0.8 the line spans `Wc` ∈ [17.39, 23.60] and mid-ECMF lands at `Wc` = 22.785
+— **87% of the way to choke, with 3.6% of margin**. The closure inverts *inlet*
+`Wc`, so that is the margin that governs. Moving along the line, at Nc 0.8:
+
+| position in `Wc` | PR | peak-to-peak in W | mean offset |
+| --- | --- | --- | --- |
+| 0.582 | **5.040** | **6.23e−10** | **+1.40e−10** |
+| 0.764 | 4.762 | 9.00e−05 | −4.10e−08 |
+| 0.87 (mid-ECMF) | 4.436 | 1.63e−02 | −3.56e−04 |
+
+**PR 5.04 holds to 1.4e−10.** The degradation is smooth and monotone in
+proximity to choke, which identifies it as the conditioning problem §3.5 already
+recorded from the other side: ICMF compresses the whole β range into 3–10% of
+mass flow above 72% speed, so near choke the closure inverts a nearly vertical
+curve. `InletFlowCompressor` keys on inlet `Wc` deliberately — keying on *exit*
+corrected flow closes an algebraic loop through the source's own output, with
+measured gain 0.90–1.10 — so this is the price of that choice, and it is only
+paid near the choke end.
+
+The same effect fully saturated is the `beta` = 0.0000 clamping seen at Nc 0.9,
+with `PR` pinned at the line's end value 4.6161. That is "suspect 1" returning,
+for a reason now understood.
+
+**Where the ceiling is now.** Sweeping the top speeds at a comfortable margin:
+
+| Nc | PR | position in `Wc` | result |
+| --- | --- | --- | --- |
+| 0.7 | 3.104 | 0.5 | **held, 6.27e−11** |
+| 0.8 | **5.040** | 0.582 | **held, 1.40e−10** |
+| 0.8 | 4.762 | 0.764 | 9.0e−05 cycle |
+| 0.9 | 7.424 | 0.710 | survives, 3.6e−03 cycle |
+| 0.9 | 6.771 | 0.853 | dies at step 2023 |
+| 1.0 | 9.454 | 0.689 | dies at step 791 |
+| 1.05 | 10.162 | **0.319** | dies at step 189 |
+
+Two *different* remaining failures, and they must not be conflated:
+
+1. **Near-choke cycling**, above roughly 0.75 of the `Wc` range — the
+   conditioning problem above. It degrades smoothly and predictably.
+2. **A startup failure at Nc ≥ 1.0**, which is not that: at Nc 1.05 the design
+   point sits at 0.319 of the range, nowhere near choke, and the run still dies
+   in 189 steps. The linearised design state at Nc 1.0 is **−19.1**, i.e.
+   stable, so this is a *basin* problem — the flux-integrated seed is an exact
+   steady state of the continuous equations but not of the discrete ones, and at
+   PR 9+ the startup transient is large enough to leave the basin.
+
+For (2) the tool is pseudo-transient continuation with `ImplicitStepper`, which
+is half-built: Newton stops converging near dt = 5.6e−2 s because the
+preconditioner is diagonal (§3.17). The continuation *ramp* is not the tool —
+bringing the source up from zero against a back pressure sized for full PR blows
+up at steps 286 and 334 where starting at full strength survives.
+
+**Also open.** A first attempt to put `LocalLevelFilter`'s states into the
+eigenvalue problem disagreed with its own validated frozen limit (+37.0 against
+−38.96 at Nc 0.8) and is therefore **wrong**; its numbers are recorded nowhere,
+and the rig needs fixing before the level filter's dynamics can be analysed.
 
 **The continuation ramp is the wrong tool for the startup.** Bringing the source
 up from zero against a back pressure sized for full PR blows up at steps 286 and
@@ -1747,17 +1810,25 @@ D10.
 
 ## 8. Known gaps
 
-- **Fixed to PR 2.0, not beyond.** The inlet lag on `(T₀₁, p₀₁, W)` (§3.12,
-  §3.13) holds the operating point to ~2e-10 up to PR 2.0. Above that the lag
-  family stops working entirely — no `τ` up to 3 s holds PR 2.5 — and neither
-  local first-order reconstruction nor wider smearing helps. Global first order
-  reaches PR 3.0 and then blows up at 4.0. **Nothing above PR 2.0 should be
-  reported as working**, and radial machines reach 14.
-- **Above PR ≈ 3 the cause is still unknown** (§3.15). Eliminated: the source's
-  state dependence, the per-cell gradient, the reconstruction, the map's shape,
-  the exit boundary, the equal-area assumption, and damping. The inlet accounts
-  for it only to PR ≈ 3. The remaining untried option is structural — an
-  implicit solve of the disk's operating point each step.
+> **The pressure-ratio limit is resolved.** §3.16 identifies the cause and §3.18
+> the fix; §3.19 characterises what remains. The three entries immediately below
+> are kept because their *measurements* are sound and several are still the best
+> record of what was tried, but their conclusions are superseded. Current status:
+> **PR 5.040 held to 1.4e-10** on `HPC01` at Nc 0.8, and PR 3.104 to 6.3e-11,
+> provided the operating point is not in the last ~25% of the `Wc` range toward
+> choke. Near-choke points still cycle (§3.19), and that is now the open problem.
+
+- ~~**Fixed to PR 2.0, not beyond.**~~ **Superseded by §3.18.** The inlet lag on
+  `(T₀₁, p₀₁, W)` (§3.12, §3.13) holds the operating point to ~2e-10 up to
+  PR 2.0. Above that the lag family stops working entirely — no `τ` up to 3 s
+  holds PR 2.5. The reason, found later, is that the lag freezes the dimensional
+  *level* along with the operating point, turning the disk into a fixed-force,
+  fixed-heat-rate device whose steady state is a repeller from PR 2.26.
+- ~~**Above PR ≈ 3 the cause is still unknown**~~ (§3.15). **Answered in §3.16.**
+  The eliminations recorded there are all correct and all irrelevant: the
+  equilibrium itself was linearly unstable, so no numerical ingredient could have
+  been the culprit. The "remaining untried option" named there — an implicit
+  solve of the disk's operating point — was also wrong, for the same reason.
 - **Staging is the right model but does not lift the limit** (§3.14). PR 2.0
   split four ways holds to 3.6e-10, but PR 4.0 fails at every split, so the
   constraint is on the *total* pressure ratio of the duct rather than the stage.
