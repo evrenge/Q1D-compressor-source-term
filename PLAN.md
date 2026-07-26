@@ -658,6 +658,66 @@ row, so the whole row responds in unison to one measurement. A distributed
 source whose density responds to the *local* state in each cell is the
 reformulation to test.
 
+### 3.11 The prototype's systematic error was load-bearing
+
+The prototype can be given valid high-PR operating points — the back pressure
+and area are settings, not physics — and when it is, **it holds them**. Only its
+initial condition needed patching (it expands isentropically from inlet total to
+back pressure and goes complex for `pb > p01`); the numerics, limiter, Roe flux,
+RK stages and source injection are untouched. `A = 0.1`, `η = 0.9`, `M₁ = 0.45`:
+
+| PR | 1.20 | 1.40 | 1.60 | 2.00 |
+| --- | --- | --- | --- | --- |
+| W at the lookup station, error | 1.0e-03 | 4.8e-04 | 2.7e-04 | 3.1e-05 |
+| far-field spread, cell 20 vs 80 | 2.7e-15 | 2.1e-12 | 6.7e-11 | 6.5e-09 |
+
+The rewrite fails from PR 1.4, **including at legacy's own settings** (100
+cells, single-cell disk, CFL 2.5). So this is a genuine regression, not a
+difference of test configuration — moving cell count, smear and CFL one at a
+time from legacy's values to ours changes nothing qualitative.
+
+**What was removed.** Legacy tabulates `Fx` and `SWx` once, at its design inlet
+state, and interpolates that table at runtime. That is exactly the systematic
+error this project exists to fix: a table in newtons is only valid at the inlet
+condition it was built at. But the frozen table also makes the source **blind to
+the locally measured stagnation pressure**, which sets the acoustic feedback
+gain to zero by construction. Phase 3 replaced it with runtime evaluation from
+the local state — correct for varying inlet conditions, and the origin of the
+loop in §3.10:
+
+    a wave raises p01 at the sampling station
+      -> Fx ~ (PR p01 - p1) A rises
+      -> a stronger wave is launched,     loop gain ~ Fx/(p01 A)
+
+Isolated by changing **only** where the source reads its inlet state, everything
+else identical, on the clean constant-PR case at legacy geometry:
+
+| PR | 1.20 | 1.40 | 1.60 | 2.00 | 2.50 |
+| --- | --- | --- | --- | --- | --- |
+| inlet state measured **locally** (Phase 3) | 2.4e-10 | 4.7e-02 | 1.2e-01 | blew up | blew up |
+| inlet state from the **boundary condition** | 1.1e-10 | **4.3e-11** | **2.1e-11** | 7.4e-02 | 2.6e-02 |
+
+One line of difference turns 4.7e-02 into 4.3e-11.
+
+**Why the BC variant is not the fix.** It hard-codes a single upstream station,
+breaks for multi-component flowpaths, and defeats the purpose of runtime
+evaluation — responding to real inlet conditions is the entire point (P1). It
+also stops working by PR 2.0 on its own, so it is not even a complete remedy.
+
+**The specification this yields.** The source must respond to inlet conditions on
+the **flow-through timescale** but not at **acoustic frequencies**. That is a lag
+on the measured inlet stagnation state — not on β (§3.9, tried, the map slope
+was never the issue) and not on the applied source (§3.9, tried, it delays the
+instantaneous momentum-flux term too). The constant-PR case with its closed-form
+reference and a clean pass/fail at PR ≥ 1.4 is the test bed for sizing it,
+without any map machinery in the way.
+
+**Reading of the whole investigation.** Phase 3's gate at PR = 1.2 sat just
+inside the stable region, so the instability the fix introduced never showed,
+and four phases were built on top of it. Everything in §3.9 — closures,
+coordinates, loop gains, `Z`, densification, β lags — was chasing consequences
+of that in the map layer, where the cause never was.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -1215,6 +1275,10 @@ D10.
 
 ## 8. Known gaps
 
+- **Phase 3's runtime source evaluation is a regression against the prototype**
+  at PR ≥ 1.4 (§3.11), and the prototype's frozen-table bug was what suppressed
+  it. The fix is specified (lag the measured inlet stagnation state on the
+  flow-through timescale) but not yet built or sized.
 - **The actuator-disk source fails above PR ≈ 1.3, independently of any map**
   (§3.10). A constant-PR disk with a closed-form reference holds to 1.9e-10 at
   PR 1.2 and diverges at 1.4, blowing up by 2.2. Everything below about the map
