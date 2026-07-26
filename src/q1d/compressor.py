@@ -289,13 +289,29 @@ class ActuatorDisk:
     sample_offset: int = 12
     n_smear: int = 1
     inlet_lag: float = 0.0
+    #: See :class:`InletFlowCompressor` for what this is. **Off by default here**,
+    #: unlike there, and the reason is measured: the scaling divides by the
+    #: pressure of the cell being forced, and forcing one cell raises its own
+    #: pressure by ``Fx/A``, so the self-interaction has gain of order
+    #: ``(PR−1)/(2·n_smear)``. At the ``n_smear = 1`` this class defaults to,
+    #: that is not small. On the four-stage PR-2.0 train the unscaled form holds
+    #: the operating point to **−1.7e−07** and the scaled form only to
+    #: **−6.9e−04** (``PLAN.md`` §3.18).
+    #:
+    #: :class:`InletFlowCompressor` defaults it on because that is where the
+    #: high-pressure-ratio work was done and validated, always with a smear of 21
+    #: cells, where the same gain is ~0.1 at PR 5. Turn it on here only with a
+    #: smear wide enough to make that ratio small, and measure it.
+    similarity_scaling: bool = False
     last: DiskState = field(default_factory=DiskState)
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
     _filter: InletFilter = field(init=False, repr=False, default=None)
+    _levels: "LocalLevelFilter" = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         self._filter = InletFilter(self.inlet_lag)
+        self._levels = LocalLevelFilter(self.inlet_lag)
         if self.n_smear < 1:
             raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
         if self.sample_offset < 1:
@@ -400,8 +416,15 @@ class ActuatorDisk:
 
         q = np.zeros((3, grid.n_interior))
         span = slice(self.cell, self.cell + self.n_smear)
-        q[1, span] = Fx * self._weights
-        q[2, span] = SWx * self._weights
+        if self.similarity_scaling:
+            p_now = solver.p[1:-1][span]
+            m_now = solver.cv[1, 1:-1][span]
+            p_ref, m_ref = self._levels.update(solver.t, p_now, m_now)
+            q[1, span] = Fx * self._weights * (p_now / p_ref)
+            q[2, span] = SWx * self._weights * (m_now / m_ref)
+        else:
+            q[1, span] = Fx * self._weights
+            q[2, span] = SWx * self._weights
         return q
 
     # -- convenience --------------------------------------------------------
@@ -634,9 +657,18 @@ class InletFlowCompressor:
     +77.3, +99.9, +114.4 to **−69.8, −53.9, −39.0, −27.5, −19.1** at Nc 0.6
     through 1.0, i.e. PR 2.26 through 7.49.
 
+    **It wants a smear.** The scaling divides by the pressure of the cell being
+    forced, and forcing a cell raises its own pressure by ``Fx/A``, so there is a
+    self-interaction of gain of order ``(PR−1)/(2·n_smear)``. Every measurement
+    above used ``n_smear = 21``, where that is ~0.1 even at PR 5. At
+    ``n_smear = 1`` it is not small, and it shows: on a four-stage PR-2.0 train
+    the unscaled injection holds to −1.7e−07 while the scaled one manages only
+    −6.9e−04. :class:`ActuatorDisk` therefore defaults it **off**. Use a smear
+    wide enough that the ratio is small, and measure rather than assume.
+
     ``similarity_scaling=False`` restores the fixed-force, fixed-rate injection.
     It exists so the regression test can assert that the old form *fails*, and
-    is not a supported configuration.
+    is not a supported configuration above PR 2.3.
     """
 
     cell: int

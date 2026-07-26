@@ -1110,6 +1110,17 @@ leftover mismatch biased the converged mass flow by **−5.5e−04** — three o
 outside the Phase 3 gate. Referencing the field against its own past cannot
 drift, because at convergence past and present are the same field.
 
+**It wants a smear, and that is not a free parameter.** The scaling divides by
+the pressure of the cell being forced, and forcing a cell raises its own pressure
+by `Fx/A`, so there is a self-interaction of gain of order `(PR−1)/(2·n_smear)`.
+Every measurement below used `n_smear = 21`, where that is ~0.1 even at PR 5. At
+`n_smear = 1` it is not small, and it shows: on the four-stage PR-2.0 train of
+§3.14 the **unscaled** injection holds the operating point to **−1.7e−07** and
+the scaled one only to **−6.9e−04**. So `ActuatorDisk` defaults the scaling
+**off** and `InletFlowCompressor` defaults it **on** — the asymmetry is
+deliberate and is where the high-PR work was validated. Anyone turning it on with
+a narrow smear should expect it to be worse, not better.
+
 **Measured.** Largest eigenvalue of the linearised design state, `HPC01`:
 
 | Nc | PR | fixed force / rate | similarity-scaled |
