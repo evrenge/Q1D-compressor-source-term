@@ -12,6 +12,7 @@ venv/
 *.npy
 !data/maps/*.xlsx
 *.png
+!docs/*.png
 prof
 
 # profiler output

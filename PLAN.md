@@ -453,9 +453,48 @@ reported here because it was run and because it does bound the strength effect:
 at a quarter strength (`PR = 1.285`) the same configuration converges to
 `W` within 1.9e-7.
 
-**Status.** Not yet resolved. The measurements above are the useful output of
-this pass; the remedy is not settled and no claim is made that a real map has
-been held steady. See §8.
+**What the solver does, speed by speed.** 401 cells, 81 smear cells, 12-cell
+standoff, inlet closure, seeded from `steady_profile`, converged on the disk's
+own mass flow going quiet, then held 10× longer. Error is against the map point
+the duct was designed for.
+
+| `SubsonicCompressor` Nc | 0.330 | 0.430 | 0.530 | 0.625 | 0.672 | 0.728 | 0.833 | 0.930 | 1.000 | 1.100 | 1.200 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| W error | 1.6e-11 | 3.8e-11 | 4.6e-11 | 1.0e-09 | 4.0e-08 | 2.1e-02 | 2.8e-01 | 6.1e-01 | 1.7e-01 | blew up | blew up |
+| drift over the hold | 1.2e-12 | 1.7e-12 | 3.0e-11 | 7.4e-10 | 3.4e-08 | 4.6e-02 | 6.1e-01 | 4.3e-01 | 6.7e-01 | — | — |
+| `|dlnFx/dlnW|` | 0.34 | 0.44 | 0.58 | 0.64 | **0.78** | **0.95** | 1.24 | 1.88 | 3.29 | 8.38 | 29.4 |
+
+`TranssonicCompressor` behaves the same way: 1.3e-11 at Nc = 0.359, 5.5e-8 at
+0.528, then 1.7e-01 at 0.661; from 0.880 up the inlet closure refuses to run at
+all because `Wc` is not invertible there.
+
+**The boundary is the loop gain crossing one.** Eight orders of magnitude of
+accuracy are lost between Nc = 0.672 (gain 0.78, held to 4e-8) and Nc = 0.728
+(gain 0.95, off by 2%). Nothing else changes across that boundary — same mesh,
+same smear, same seed, same source magnitude trend. This is the first
+*prediction* the loop-gain analysis has made rather than explained.
+
+**Remedies tried.** A first-order lag of time constant `τ` on the applied
+source — the textbook fix for a delayed loop, and one with unit DC gain, so the
+converged point is unchanged by construction:
+
+| Nc = 0.7285, gain 0.95 | τ = 0 | 3e-4 | 1e-3 | 3e-3 | **1e-2** |
+| --- | --- | --- | --- | --- | --- |
+| W error | 1.3e-01 | 5.9e-02 | 2.0e-02 | 6.1e-03 | **5.7e-07** |
+
+At Nc = 0.833 (gain 1.24) the same sweep does not converge at any `τ` tried
+(best 1.25e-01). Shortening the standoff, which is the other way to cut the
+delay, does not help at either speed — 5.4e-02 at offset 2 and 2.7e-02 at
+offset 4 against 1.3e-01 at offset 12 — so the standoff is not the dominant
+delay; the acoustic transit of the smear region and duct is.
+
+**Status.** Half resolved, and the half that works is measured rather than
+asserted: a real map now drives the solver to its own operating point to 1e-11
+in mass flow with 1e-12 drift, at five speeds on `SubsonicCompressor` and two on
+`TranssonicCompressor`. Above `|dlnFx/dlnW| ≈ 1` it does not, and whether that
+is a numerical instability or a property of the coupled compressor-duct system
+is **not yet settled** — the mesh-refinement discriminator is the next test. No
+claim is made either way. See §8.
 
 ### 3.4 Measured cost of the alternatives
 
