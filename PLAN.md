@@ -1114,12 +1114,24 @@ drift, because at convergence past and present are the same field.
 the pressure of the cell being forced, and forcing a cell raises its own pressure
 by `Fx/A`, so there is a self-interaction of gain of order `(PR−1)/(2·n_smear)`.
 Every measurement below used `n_smear = 21`, where that is ~0.1 even at PR 5. At
-`n_smear = 1` it is not small, and it shows: on the four-stage PR-2.0 train of
-§3.14 the **unscaled** injection holds the operating point to **−1.7e−07** and
-the scaled one only to **−6.9e−04**. So `ActuatorDisk` defaults the scaling
-**off** and `InletFlowCompressor` defaults it **on** — the asymmetry is
-deliberate and is where the high-PR work was validated. Anyone turning it on with
-a narrow smear should expect it to be worse, not better.
+`n_smear = 1` it is not small. Measured on the staged train of §3.14:
+
+| total PR | stages | stage PR | `n_smear` | scaling **off** | scaling **on** |
+| --- | --- | --- | --- | --- | --- |
+| 2.0 | 4 | 1.189 | 1 | **held, −1.7e−07** | −6.9e−04 |
+| 2.0 | 4 | 1.189 | 11 | **held, +1.3e−07** | −2.2e−06 |
+| 4.0 | 2 | 2.000 | 11 | **blows up, step 12715** | survives, −4.2e−04 |
+
+Eleven times the smear buys three hundred times the accuracy in the scaled case,
+which is the `1/n_smear` dependence showing directly. And the third row is the
+crossover: at stage PR 2.0 the *unscaled* form is the one that dies, so the
+scaling stops being a cost and becomes a requirement right where §3.16 put the
+threshold.
+
+Hence deliberately asymmetric defaults: `ActuatorDisk` **off** (it is used at low
+stage pressure ratio and defaults to `n_smear = 1`), `InletFlowCompressor`
+**on** (that is where the high-PR work was validated, always at `n_smear = 21`).
+Turning it on with a narrow smear should be expected to make things worse.
 
 **Measured.** Largest eigenvalue of the linearised design state, `HPC01`:
 
