@@ -488,13 +488,49 @@ delay, does not help at either speed — 5.4e-02 at offset 2 and 2.7e-02 at
 offset 4 against 1.3e-01 at offset 12 — so the standoff is not the dominant
 delay; the acoustic transit of the smear region and duct is.
 
+**Mesh refinement separates two different failures.** Smear length held at 20%
+of the duct, everything else fixed, `W` error against the map point:
+
+| Nc | gain | 201 cells | 401 | 801 | 1601 |
+| --- | --- | --- | --- | --- | --- |
+| 0.672 | 0.78 | 1.7e-02 | **9.6e-09** | **3.4e-07** | **8.3e-08** |
+| 0.728 | 0.95 | 1.1e-01 | 6.7e-03 | 1.1e-02 | **2.4e-06** |
+| 0.833 | 1.24 | 3.0e-01 | 8.3e-02 | 4.4e-01 | 6.6e-02 |
+
+The first two rows converge under refinement, so those failures are
+**discretisation**, and either refining or damping removes them. The third does
+not: 1.24 stays at O(1e-1) across an eightfold refinement, and the lag does not
+touch it either. Two independent remedies failing the same way, mesh-
+independently, is evidence that above `|dlnFx/dlnW| ≈ 1` the difficulty is in
+the **problem**, not the discretisation of it.
+
+**Leading hypothesis, not yet a conclusion: the exit boundary is a degenerate
+throttle.** A fixed static back pressure has a horizontal characteristic in the
+(W, p) plane — it supplies no restoring pressure when the flow moves, which is
+the least stabilising exit condition there is. A real throttle is an *area*:
+pass more flow through it and the pressure it demands rises. On a steep speed
+line the compressor's own characteristic is nearly vertical, so the
+intersection of a near-vertical compressor line with a horizontal throttle line
+is exactly the ill-conditioned case. If that is right, the fix is a nozzle
+outlet rather than a pressure outlet, and it is a *modelling* fix, not a
+numerical one.
+
+A first test gave the outlet a linearised throttle stiffness
+`p_back = p_back0 + K(W − W₀)`, with `k = K·W₀/p_back0` the dimensionless
+stiffness. At Nc = 0.833 it improves the error but does not restore the hold —
+2.8e-01 at `k = 0`, then 5.3e-02, 5.5e-02, 9.3e-02 at `k` = 0.5, 1, 2 — and
+blows up within 25 steps at `k` = 5 and 10. **This is weak evidence either
+way.** The implementation writes the boundary pressure from inside the source
+callback, so it is updated within the Runge-Kutta stages rather than as a
+proper characteristic outlet; the blow-up at large `k` is that coupling going
+unstable, not the physics rejecting a stiff throttle. A real nozzle boundary
+condition is needed before the hypothesis can be called confirmed or refuted.
+
 **Status.** Half resolved, and the half that works is measured rather than
-asserted: a real map now drives the solver to its own operating point to 1e-11
-in mass flow with 1e-12 drift, at five speeds on `SubsonicCompressor` and two on
-`TranssonicCompressor`. Above `|dlnFx/dlnW| ≈ 1` it does not, and whether that
-is a numerical instability or a property of the coupled compressor-duct system
-is **not yet settled** — the mesh-refinement discriminator is the next test. No
-claim is made either way. See §8.
+asserted: a real map drives the solver to its own operating point to 1e-11 in
+mass flow with 1e-12 drift, at five speeds on `SubsonicCompressor` and two on
+`TranssonicCompressor` (`docs/phase5_ecmf_map.png`). Above the gain-one boundary
+it does not, and the cause is **not settled**. See §8.
 
 ### 3.4 Measured cost of the alternatives
 
@@ -1053,6 +1089,21 @@ D10.
 
 ## 8. Known gaps
 
+- **Phase 5 stops at `|dlnFx/dlnW| ≈ 1`.** Below it a real map is held to 1e-11
+  in mass flow with 1e-12 drift; above it the operating point is not held, at
+  any mesh from 201 to 1601 cells and with either remedy tried (§3.9). On
+  `SubsonicCompressor` that is Nc ≤ 0.672 of 12 speed lines; on
+  `TranssonicCompressor`, Nc ≤ 0.528 of 9, with the top five refusing the inlet
+  closure outright because `Wc` is not invertible there. **Nothing above those
+  speeds should be trusted or reported as working.** Next tests, in order: a
+  proper nozzle outlet (the current throttle test is confounded by updating the
+  boundary inside the RK stages); then, if that fails, whether a quasi-steady
+  map is the wrong closure for a near-vertical speed line at all.
+- **The lag is a steady-state device only.** A first-order lag with `τ = 1e-2 s`
+  restores the hold at gain 0.95, and its unit DC gain means the converged point
+  is exact. But `τ` is the same order as the settling time, so it is *not*
+  usable for transient work — which is the project's actual purpose. It is
+  recorded as a diagnostic that identified the mechanism, not as a solution.
 - **No transient acceptance criterion.** The solver's purpose is transient
   response and every gate is steady-state. The hold test (Q4) demonstrates
   stability, not transient *accuracy*. To be revisited when transient data
