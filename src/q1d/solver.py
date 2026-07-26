@@ -155,6 +155,7 @@ class Solver:
         reference: ReferenceState,
         config: SolverConfig | None = None,
         source: Callable[[Solver], np.ndarray] | None = None,
+        low_order_faces: np.ndarray | None = None,
     ) -> None:
         self.grid = grid
         self.gas = gas
@@ -162,6 +163,27 @@ class Solver:
         self.reference = reference
         self.config = config or SolverConfig()
         self.source = source
+
+        # Faces where MUSCL falls back to first order. A source term applied to
+        # cell averages with no matching treatment in the reconstruction is not
+        # well balanced: inside the smeared region MUSCL reads a *source*-imposed
+        # profile as a solution gradient and reconstructs across it. The
+        # geometric source p*dA/dx avoids this because it is written to telescope
+        # against the pressure flux exactly; the disk source has no such form.
+        # Measured (PLAN.md 3.13): at PR 2.0 first order holds the operating
+        # point to 2.5e-14 while second order misses by 4e-4 to 4e-2 at every
+        # smear width, and widening the smear makes it worse rather than better.
+        # `ActuatorDisk.low_order_faces` builds the mask.
+        if low_order_faces is None:
+            self.low_order_faces = None
+        else:
+            mask = np.asarray(low_order_faces, dtype=bool)
+            if mask.shape != (grid.n_interior + 1,):
+                raise ValueError(
+                    f"low_order_faces has shape {mask.shape}, expected "
+                    f"{(grid.n_interior + 1,)} -- one entry per face"
+                )
+            self.low_order_faces = mask
 
         n = grid.n_interior
         self.cv = np.zeros((3, n + 2))
@@ -263,6 +285,9 @@ class Solver:
         eps = self._eps2
         dr = _van_albada(du[:, 2:], du[:, 1:-1], eps)
         dl = _van_albada(du[:, 1:-1], du[:, :-2], eps)
+        if self.low_order_faces is not None:
+            dr = np.where(self.low_order_faces, 0.0, dr)
+            dl = np.where(self.low_order_faces, 0.0, dl)
         return prim[:, :-1] + 0.5 * dl, prim[:, 1:] - 0.5 * dr
 
     def _roe_flux(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:

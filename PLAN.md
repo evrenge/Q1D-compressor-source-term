@@ -766,6 +766,55 @@ regression ever silently repairs itself, the test says so rather than passing
 quietly. Phase 3's single check at PR 1.2 is what let four phases build on a
 defect.
 
+### 3.13 Closing the second path: lag the mass flow too
+
+§3.12 lagged `(T₀₁, p₀₁)` and reached PR 1.6. What remained instantaneous was
+`W`: the sampling station's mass flow still responds to a passing wave within a
+step, and `Fx` depends on it, so one feedback path stayed open. `InletFilter`
+now lags all three on the same time constant.
+
+Smallest `τ` that holds, constant PR, legacy geometry (duct `L/c` = 2.94e-3 s):
+
+| PR | 1.40 | 1.60 | 2.00 | 2.50 |
+| --- | --- | --- | --- | --- |
+| τ needed | 3e-3 | 3e-3 | **1e-2** | none up to 3 s |
+| τ/(L/c) | 1.0 | 1.0 | 3.4 | — |
+| W error | 2.05e-10 | 2.01e-10 | 2.16e-10 | — |
+
+At PR 2.0 the stagnation-only filter gives −2.38e-02 and the full filter
+2.16e-10. **The usable range moves from PR ≤ 1.6 to PR ≤ 2.0.**
+
+**The lag family has a ceiling, it does not merely need more.** At PR 2.5 no `τ`
+on a ladder up to 3 s holds the point — three orders above the acoustic transit,
+and far beyond anything defensible as a blade-row response time. So the
+remaining obstacle is not the feedback the lag addresses.
+
+**Two hypotheses tested and rejected.**
+
+*Source/reconstruction imbalance.* The geometric source is well balanced and the
+disk source is not, so MUSCL might be reading a source-imposed profile as a
+solution gradient. If so, dropping to first order **near the disk** would fix
+it. It does not: at PR 2.0 a local first-order region gives −9.8e-03 against
++4.1e-04 for plain second order, while *global* first order holds to 2.5e-14.
+First order is damping the whole duct, not repairing anything at the source, so
+this hypothesis is wrong and first order is a mask rather than a fix.
+
+*Wider smearing.* At PR 2.0, second order gives 4.1e-04 at `n_smear` = 1 and
+degrades to 1.2e-02 and 4.0e-02 at 11 and 21 cells. Spreading the source makes
+it **worse**, which also rules out "the gradient is simply too steep for one
+cell".
+
+**Where each scheme stops** (inlet lag on throughout):
+
+| | PR 2.0 | 2.5 | 3.0 | 4.0 |
+| --- | --- | --- | --- | --- |
+| second order | **2.16e-10** | fails | fails | fails |
+| first order | 3.7e-14 | 1.2e-14 | 2.9e-12 | blows up |
+
+First order buys another 1.5 in pressure ratio and then stops too, so above
+PR 3 the difficulty is not the reconstruction either. At PR 4 the disk is asked
+for `Fx/(p₁A)` = 3.6 — a 4.6× static pressure rise across the modelled element.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -1323,11 +1372,12 @@ D10.
 
 ## 8. Known gaps
 
-- **Fixed to PR 1.6, not beyond.** The inlet lag (§3.12) restores 2e-10 at PR
-  1.4 and 1.6 and converts divergence into a bounded 1–5% oscillation at 2.0 and
-  2.5. A second mechanism acts above ~1.7 and is **not diagnosed**. Radial
-  machines reach PR 14, so the disk is still far short of the range the maps
-  need, and nothing above PR 1.6 should be reported as working.
+- **Fixed to PR 2.0, not beyond.** The inlet lag on `(T₀₁, p₀₁, W)` (§3.12,
+  §3.13) holds the operating point to ~2e-10 up to PR 2.0. Above that the lag
+  family stops working entirely — no `τ` up to 3 s holds PR 2.5 — and neither
+  local first-order reconstruction nor wider smearing helps. Global first order
+  reaches PR 3.0 and then blows up at 4.0. **Nothing above PR 2.0 should be
+  reported as working**, and radial machines reach 14.
 - **The actuator-disk source fails above PR ≈ 1.3, independently of any map**
   (§3.10). A constant-PR disk with a closed-form reference holds to 1.9e-10 at
   PR 1.2 and diverges at 1.4, blowing up by 2.2. Everything below about the map

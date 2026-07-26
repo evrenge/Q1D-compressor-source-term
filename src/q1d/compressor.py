@@ -77,6 +77,13 @@ class InletFilter:
     a sixth of a revolution at 10,000 rpm and is what the measurements above
     used. :func:`rotor_period` derives it when the shaft speed is known.
 
+    **The mass flow is lagged too.** With only ``(T₀, p₀)`` filtered, PR 1.4 and
+    1.6 hold but 2.0 does not: the sampling station's ``W`` still responds
+    instantly to a passing wave and ``Fx`` depends on it, so one feedback path
+    stays open. Lagging ``W`` on the same time constant closes it — at PR 2.0,
+    ``τ`` = 3e-2 gives 2.161e-10 against −2.380e-02 with the stagnation state
+    alone (``PLAN.md`` §3.13).
+
     ``tau = 0`` disables the filter and restores the unfiltered behaviour, which
     is correct only below PR ≈ 1.3.
     """
@@ -85,6 +92,7 @@ class InletFilter:
 
     _T0: float = field(init=False, repr=False, default=math.nan)
     _p0: float = field(init=False, repr=False, default=math.nan)
+    _W: float = field(init=False, repr=False, default=math.nan)
     _t: float = field(init=False, repr=False, default=math.nan)
 
     def __post_init__(self) -> None:
@@ -92,14 +100,14 @@ class InletFilter:
             raise ValueError(f"inlet filter tau must be non-negative, got {self.tau!r}")
 
     @property
-    def state(self) -> tuple[float, float]:
-        """The filtered ``(T0, p0)`` currently in use."""
-        return self._T0, self._p0
+    def state(self) -> tuple[float, float, float]:
+        """The filtered ``(T0, p0, W)`` currently in use."""
+        return self._T0, self._p0, self._W
 
     def reset(self) -> None:
-        self._T0 = self._p0 = self._t = math.nan
+        self._T0 = self._p0 = self._W = self._t = math.nan
 
-    def update(self, t: float, T0: float, p0: float) -> tuple[float, float]:
+    def update(self, t: float, T0: float, p0: float, W: float) -> tuple[float, float, float]:
         """Advance the filter to time ``t`` and return the state to use.
 
         Advances **once per step**, not once per Runge-Kutta stage: the solver
@@ -111,15 +119,16 @@ class InletFilter:
         from a converged field is not disturbed.
         """
         if self.tau <= 0.0:
-            return T0, p0
+            return T0, p0, W
         if math.isnan(self._T0):
-            self._T0, self._p0, self._t = T0, p0, t
+            self._T0, self._p0, self._W, self._t = T0, p0, W, t
         elif t > self._t:
             alpha = 1.0 - math.exp(-(t - self._t) / self.tau)
             self._t = t
             self._T0 += alpha * (T0 - self._T0)
             self._p0 += alpha * (p0 - self._p0)
-        return self._T0, self._p0
+            self._W += alpha * (W - self._W)
+        return self._T0, self._p0, self._W
 
 
 def rotor_period(rpm: float) -> float:
@@ -272,6 +281,34 @@ class ActuatorDisk:
             )
         return float(areas[0])
 
+    # -- reconstruction -----------------------------------------------------
+
+    def low_order_faces(self, grid, margin: int = 2) -> np.ndarray:
+        """Faces where MUSCL should drop to first order — pass to ``Solver``.
+
+        The disk source is added to cell averages with nothing matching it in
+        the reconstruction, so MUSCL reads the source-imposed profile inside the
+        smeared region as a solution gradient. Measured at PR 2.0 (``PLAN.md``
+        §3.13): first order holds the operating point to 2.5e-14 while second
+        order misses by 4e-4 with a one-cell disk and by 4e-2 with 21 cells —
+        widening the smear makes it *worse*, which rules out "the gradient is
+        simply too steep".
+
+        Restricting the fallback to the disk's own neighbourhood keeps the far
+        field second order, and costs nothing physical: an actuator disk is a
+        *model* of a blade row, not resolved geometry, so there is no sub-cell
+        structure there to resolve accurately in the first place.
+
+        ``margin`` extra cells each side cover the reconstruction stencil, which
+        reaches one cell beyond the face it feeds.
+        """
+        n = grid.n_interior
+        mask = np.zeros(n + 1, dtype=bool)
+        lo = max(0, self.cell - margin)
+        hi = min(n, self.cell + self.n_smear + margin)
+        mask[lo : hi + 1] = True
+        return mask
+
     # -- evaluation ---------------------------------------------------------
 
     def __call__(self, solver: Solver) -> np.ndarray:
@@ -292,8 +329,9 @@ class ActuatorDisk:
         W = rho_i * u_i * float(grid.a_cell[i])
 
         # The blade row tracks its inlet condition, not its own acoustic echo
-        # (PLAN.md 3.11). Unit DC gain, so the converged answer is unchanged.
-        T01, p01 = self._filter.update(solver.t, T01, p01)
+        # (PLAN.md 3.11, 3.13). Unit DC gain, so the converged answer is
+        # unchanged. W is filtered too, or one feedback path stays open.
+        T01, p01, W = self._filter.update(solver.t, T01, p01, W)
 
         phi1 = W * math.sqrt(gas.R * T01) / (area * p01)
         phi_max = max_flow_function(gas)
@@ -580,7 +618,7 @@ class InletFlowCompressor:
             self.last = MappedDiskState(W=W, T01=T01, p01=p01)
             return np.zeros((3, n))
 
-        T01, p01 = self._filter.update(solver.t, T01, p01)
+        T01, p01, W = self._filter.update(solver.t, T01, p01, W)
         theta, delta = T01 / T_REF, p01 / P_REF
         Wc = W * math.sqrt(theta) / delta
         point = self.beta_map.evaluate_at_Wc(Wc, self.corrected_speed)

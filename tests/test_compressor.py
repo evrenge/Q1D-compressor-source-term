@@ -290,7 +290,7 @@ class TestInletFilter:
     def test_zero_tau_is_a_pass_through(self):
         f = InletFilter(0.0)
         for t in (0.0, 1.0, 2.0):
-            assert f.update(t, 300.0, 2.0e5) == (300.0, 2.0e5)
+            assert f.update(t, 300.0, 2.0e5, 20.0) == (300.0, 2.0e5, 20.0)
 
     def test_negative_tau_is_rejected(self):
         with pytest.raises(ValueError, match="non-negative"):
@@ -299,45 +299,46 @@ class TestInletFilter:
     def test_first_call_seeds_from_the_measurement(self):
         """A converged seed must not be disturbed by switching the filter on."""
         f = InletFilter(1e-3)
-        assert f.update(0.0, 300.0, 2.0e5) == (300.0, 2.0e5)
+        assert f.update(0.0, 300.0, 2.0e5, 20.0) == (300.0, 2.0e5, 20.0)
 
     def test_unit_dc_gain(self):
         """A held input must be tracked exactly — this is why tau cannot bias
         the converged answer, and it is the property that makes the filter a
         stability device rather than a fudge factor."""
         f = InletFilter(1e-3)
-        f.update(0.0, 300.0, 2.0e5)
+        f.update(0.0, 300.0, 2.0e5, 20.0)
         t = 0.0
         for _ in range(20000):
             t += 1e-6
-            T0, p0 = f.update(t, 310.0, 2.2e5)
+            T0, p0, W = f.update(t, 310.0, 2.2e5, 21.0)
         assert T0 == pytest.approx(310.0, rel=1e-8)
         assert p0 == pytest.approx(2.2e5, rel=1e-8)
+        assert W == pytest.approx(21.0, rel=1e-8)
 
     def test_advances_once_per_step_not_once_per_stage(self):
         """The solver calls a source at every RK stage; integrating the filter
         at each would run it at five times the physical rate."""
         f = InletFilter(1e-3)
-        f.update(0.0, 300.0, 2.0e5)
-        once = f.update(1e-4, 310.0, 2.2e5)
+        f.update(0.0, 300.0, 2.0e5, 20.0)
+        once = f.update(1e-4, 310.0, 2.2e5, 21.0)
         for _ in range(4):  # four more stages at the same time
-            again = f.update(1e-4, 310.0, 2.2e5)
+            again = f.update(1e-4, 310.0, 2.2e5, 21.0)
         assert again == once
 
     def test_approaches_a_step_at_the_stated_rate(self):
         """After one tau the response is 1 - 1/e of the step."""
         f = InletFilter(1e-3)
-        f.update(0.0, 300.0, 1.0e5)
-        T0, p0 = f.update(1e-3, 400.0, 2.0e5)
-        assert T0 == pytest.approx(300.0 + 100.0 * (1 - math.exp(-1.0)), rel=1e-12)
-        assert p0 == pytest.approx(1.0e5 + 1.0e5 * (1 - math.exp(-1.0)), rel=1e-12)
+        f.update(0.0, 300.0, 1.0e5, 10.0)
+        T0, p0, W = f.update(1e-3, 400.0, 2.0e5, 20.0)
+        for got, lo, hi in ((T0, 300.0, 400.0), (p0, 1.0e5, 2.0e5), (W, 10.0, 20.0)):
+            assert got == pytest.approx(lo + (hi - lo) * (1 - math.exp(-1.0)), rel=1e-12)
 
     def test_reset_forgets_the_state(self):
         f = InletFilter(1e-3)
-        f.update(0.0, 300.0, 2.0e5)
-        f.update(1e-3, 400.0, 3.0e5)
+        f.update(0.0, 300.0, 2.0e5, 20.0)
+        f.update(1e-3, 400.0, 3.0e5, 25.0)
         f.reset()
-        assert f.update(2e-3, 350.0, 2.5e5) == (350.0, 2.5e5)
+        assert f.update(2e-3, 350.0, 2.5e5, 22.0) == (350.0, 2.5e5, 22.0)
 
 
 class TestRotorPeriod:
