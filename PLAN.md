@@ -815,6 +815,46 @@ First order buys another 1.5 in pressure ratio and then stops too, so above
 PR 3 the difficulty is not the reconstruction either. At PR 4 the disk is asked
 for `Fx/(p₁A)` = 3.6 — a 4.6× static pressure rise across the modelled element.
 
+### 3.14 Staging helps; the binding limit is the *total* pressure ratio
+
+No machine raises pressure 4:1 in one element. A PR-14 compressor is eight to
+ten stages over a metre, and PR 14 split eight ways is 1.40 a stage — which the
+disk holds to 2e-10. So the natural model for high pressure ratio is a train of
+disks, not one disk with a huge jump.
+
+**Staging works, and the stages do not fight each other.** Same total pressure
+ratio, split different ways, 601 cells:
+
+| total PR | stages | stage PR | gap | W error |
+| --- | --- | --- | --- | --- |
+| 2.0 | 1 | 2.00 | — | 3.72e-06 *(not held)* |
+| 2.0 | 2 | 1.414 | 40 | **3.70e-07** |
+| 2.0 | 2 | 1.414 | 80 | **5.11e-09** |
+| 2.0 | 4 | 1.189 | 40 | **3.63e-10** |
+
+Splitting improves the answer by four orders and wider spacing helps again, so
+the disks are not coupling destructively.
+
+**But the limit is on the total, not the stage.** At PR 4.0 every split tried
+blows up — 2 stages at 10413 steps, 4 stages at 24833, 4 stages with `τ`=1e-1 at
+46707 — even though a *single* PR-1.414 disk is stable indefinitely. More stages
+buy time and never stability.
+
+That points away from the disk. A wave launched by the last stage runs upstream
+through every stage ahead of it, each amplifying it, and the duct's overall 4×
+rise sits against a fixed stagnation-inlet boundary. The compounding is in the
+**train plus its boundaries**, not in any one element.
+
+**A mesh sensitivity worth recording.** The same single-stage PR 2.0 case holds
+to 2.16e-10 on 100 cells and misses at 3.72e-06 on 601. Finer meshes are *less*
+stable here, consistent with first order (more dissipative) outperforming second
+throughout §3.13. Any claim about a pressure-ratio limit must state its mesh.
+
+**Status.** Best current configuration — inlet lag on `(T₀₁, p₀₁, W)`, staged
+disks, generous spacing — holds a total pressure ratio of **2.0** to 3.6e-10.
+PR 4 and above is unresolved, and the next thing to examine is the inlet
+boundary condition under a large adverse duct pressure rise, not the disk.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -1378,6 +1418,11 @@ D10.
   local first-order reconstruction nor wider smearing helps. Global first order
   reaches PR 3.0 and then blows up at 4.0. **Nothing above PR 2.0 should be
   reported as working**, and radial machines reach 14.
+- **Staging is the right model but does not lift the limit** (§3.14). PR 2.0
+  split four ways holds to 3.6e-10, but PR 4.0 fails at every split, so the
+  constraint is on the *total* pressure ratio of the duct rather than the stage.
+  The evidence points at the train-plus-boundaries, not the disk; the inlet
+  boundary condition under a large adverse pressure rise is the next suspect.
 - **The actuator-disk source fails above PR ≈ 1.3, independently of any map**
   (§3.10). A constant-PR disk with a closed-form reference holds to 1.9e-10 at
   PR 1.2 and diverges at 1.4, blowing up by 2.2. Everything below about the map
