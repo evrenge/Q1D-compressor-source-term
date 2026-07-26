@@ -855,6 +855,63 @@ disks, generous spacing — holds a total pressure ratio of **2.0** to 3.6e-10.
 PR 4 and above is unresolved, and the next thing to examine is the inlet
 boundary condition under a large adverse duct pressure rise, not the disk.
 
+### 3.15 Above PR ≈ 3 — what it is not
+
+A long elimination pass. Recorded because each result closes a door, and
+several of these were things I would otherwise try again.
+
+**It is not the source's state dependence.** A source with constant `Fx` and
+`SWx`, reading nothing at all, blows up at PR 4 (step 5778, 201 cells). No
+source-term formulation can fix that.
+
+**It is not the per-cell gradient.** Spreading that constant source until the
+static pressure rises only **0.7% per cell** (`n_smear` = 201 of 401) still
+blows up. At PR 2 spreading *does* fix it — 1.20e-04 → 3.64e-07 across
+`n_smear` 1 → 201, a smooth convergence — so the two pressure ratios fail for
+different reasons and PR 2 was never a stability problem at all, only accuracy.
+
+**It is not the reconstruction.** Local first order around the disk is no better
+than plain second order; global first order reaches PR 3.0 and then blows up
+too. First order damps the whole duct rather than repairing anything.
+
+**It is not the map's shape.** A real map's stabilising `dPR/dW < 0` does not
+help: `HPC01` holds PR 1.73 and fails from 2.26, the same place a constant map
+fails.
+
+**It is not the exit boundary.** A choked-nozzle outlet, sized to choke exactly
+at the design point — the termination a real engine has, and one that pins
+corrected flow — fails at step 873 against 683 for a fixed static pressure.
+
+**It is not the equal-area assumption.** Contracting the duct downstream of the
+disk so the exit axial Mach returns to 0.45, instead of collapsing to 0.045 at
+PR 14, changes step 683 to step 1123.
+
+**It is not damping.** On `HPC01` at PR 4.44 the required lag is *non-monotonic*:
+τ = 1e-2 dies at step 683, 3e-2 at 4543, **1e-1 survives**, 3e-1 dies at 17333,
+1.0 dies at 12549. A resonance, not a gain to be turned down.
+
+**The inlet matters only up to PR ≈ 3.** Pinning the full inlet state
+(Dirichlet — illegal for subsonic inflow, diagnostic only) rescues the frozen
+source at PR 4 (5.9e-11 in 2000 steps) and a real map at PR 3.1 (9.1e-11). At
+PR 4.44 and above it makes no difference whatever: 706 against 683, 95 against
+95, 47 against 47. Partial absorption at the inlet does not help either — σ=0.2
+delays failure from 10313 to 30666 steps, σ=0.5 survives but collapses the flow
+(W off by 99.7%).
+
+**What it looks like.** `HPC01` at Nc = 0.8, PR 4.44, traced through the first
+683 steps: `Wc` oscillates 22.785 → 22.765 → 22.712 → 22.621 → 22.535 with the
+amplitude doubling every ~100 steps, entirely **inside** the tabulated range
+[17.39, 23.60], so nothing is being clamped. `PR` follows it 4.436 → 4.449 →
+4.480 → 4.532 → 4.579. A clean exponential growth of the `W ↔ PR` loop that the
+inlet is not part of and that damping cannot reach.
+
+**Status.** Not solved. What is left untried is structural rather than
+parametric: solving the disk's operating point *implicitly* each step — the
+value of `(Fx, SWx)` consistent with the state it produces — instead of
+evaluating it from the previous state. That is what 1D engine codes do with
+their iterative component matching, and it is the one remaining option that does
+not depend on the loop gain being small.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -1418,6 +1475,11 @@ D10.
   local first-order reconstruction nor wider smearing helps. Global first order
   reaches PR 3.0 and then blows up at 4.0. **Nothing above PR 2.0 should be
   reported as working**, and radial machines reach 14.
+- **Above PR ≈ 3 the cause is still unknown** (§3.15). Eliminated: the source's
+  state dependence, the per-cell gradient, the reconstruction, the map's shape,
+  the exit boundary, the equal-area assumption, and damping. The inlet accounts
+  for it only to PR ≈ 3. The remaining untried option is structural — an
+  implicit solve of the disk's operating point each step.
 - **Staging is the right model but does not lift the limit** (§3.14). PR 2.0
   split four ways holds to 3.6e-10, but PR 4.0 fails at every split, so the
   constraint is on the *total* pressure ratio of the duct rather than the stage.
