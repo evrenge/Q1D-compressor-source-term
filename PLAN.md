@@ -905,12 +905,209 @@ amplitude doubling every ~100 steps, entirely **inside** the tabulated range
 4.480 → 4.532 → 4.579. A clean exponential growth of the `W ↔ PR` loop that the
 inlet is not part of and that damping cannot reach.
 
-**Status.** Not solved. What is left untried is structural rather than
-parametric: solving the disk's operating point *implicitly* each step — the
-value of `(Fx, SWx)` consistent with the state it produces — instead of
-evaluating it from the previous state. That is what 1D engine codes do with
-their iterative component matching, and it is the one remaining option that does
-not depend on the loop gain being small.
+**Status.** Superseded by §3.16, which identifies the mechanism. The closing
+suggestion here — solve the disk's operating point implicitly each step — was
+**wrong**, and wrong for an instructive reason: the equilibrium it would march
+to is itself a repeller, and no time integrator reaches a repeller. That is
+measured in §3.16 and confirmed by BDF2 and SDIRK3 in §3.17.
+
+### 3.16 The equilibrium is unstable, and the lag is what makes it so
+
+Every entry in §3.15 asks "which numerical ingredient breaks the run?". The
+question has no answer because the premise is wrong. Linearising about the
+**designed steady state** — not about wherever a diverging run ended up — gives
+
+| Nc | PR | max Re(λ) | Im | e-fold |
+| --- | --- | --- | --- | --- |
+| 0.500 | 1.734 | −2.99e+01 | 0 | — |
+| 0.600 | 2.257 | **+7.00e+00** | 0 | 1.43e−01 s |
+| 0.700 | 3.104 | +4.41e+01 | 0 | 2.27e−02 s |
+| 0.800 | 4.436 | +7.73e+01 | 0 | 1.29e−02 s |
+| 1.000 | 7.489 | +1.14e+02 | 0 | 8.74e−03 s |
+
+`Im(λ) = 0`, so it is monotone divergence, not a resonance — §3.15's reading of
+the `Wc` trace as an oscillation was the growth envelope, not a frequency. The
+prediction is independent and it lands: at PR 4.44 an e-fold of 1.29e−2 s is
+**650 steps**, against the observed blow-up at step **683**.
+
+It is a property of the continuous model, not the grid. `max Re(λ)` at 101, 201
+and 401 cells with the smear held at ~10% of the duct:
+
+| Nc | PR | n=101 | n=201 | n=401 |
+| --- | --- | --- | --- | --- |
+| 0.500 | 1.734 | −2.9964e+01 | −2.9942e+01 | −2.9931e+01 |
+| 0.700 | 3.104 | +4.4185e+01 | +4.4117e+01 | +4.4084e+01 |
+| 0.800 | 4.436 | +7.7550e+01 | +7.7402e+01 | +7.7332e+01 |
+
+Four significant figures, converging. Mesh refinement is not the fix and never
+was.
+
+**What that Jacobian actually describes.** `InletFilter.update` returns its
+stored state whenever `solver.t` has not moved, and a finite-difference Jacobian
+never moves `t`. So `∂q/∂U = 0` in every number above: the map contributes
+nothing, and what is being linearised is a duct carrying a **fixed force [N] and
+a fixed heat rate [W]**. That is a known-unstable device:
+
+> `W` falls → `Δh₀ = Ẇ/W` rises → `T₀` rises → more thermal blockage → the duct
+> passes less flow → `W` falls further.
+
+The 0D static-stability slope confirms it, by pure algebra with no solver
+involved, and flips sign at exactly the speed line the eigenvalue does:
+
+| Nc | PR | `dp_exit/dW` frozen | normalised | with the map live | normalised |
+| --- | --- | --- | --- | --- | --- |
+| 0.5 | 1.734 | −5.95e+02 | −0.0326 | −2.27e+04 | −1.24 |
+| 0.6 | 2.257 | **+9.63e+01** | +0.0054 | −2.28e+04 | −1.27 |
+| 0.7 | 3.104 | +4.19e+02 | +0.0228 | −3.30e+04 | −1.80 |
+| 0.8 | 4.436 | +5.16e+02 | +0.0264 | −6.41e+04 | −3.28 |
+| 1.0 | 7.489 | +4.86e+02 | +0.0216 | −1.50e+06 | −66.74 |
+
+**The machine on its own map is stable at every speed** — slope −1.2 to −66.7,
+firmly on the falling branch. The instability is manufactured by freezing the
+source, and freezing the source is what the inlet lag of §3.12–3.13 does.
+
+This also corrects §3.13. Lagging `W` was measured on the **constant-PR** map,
+where `PR(Wc)` is flat and there is no restoring slope to delete, so lagging it
+cost nothing. On a real map `W → Wc → PR` *is* the restoring force, and lagging
+it removes the only thing holding the equilibrium up. The conclusion was right
+for the case it was measured on and does not generalise.
+
+**A first-order lag cannot be tuned out of this.** Putting the filter into the
+eigenvalue problem as three extra states,
+
+```
+dx/dt = −R(x, y)/dx          x: 3n conserved variables
+dy/dt = (m(x) − y)/τ         y: the sensed (T01, p01, W)
+```
+
+makes `τ` sweepable. Both limits reproduce numbers measured independently
+(`τ → 0` the unfiltered source, `τ → ∞` the table above), which is what
+validates the assembly:
+
+| Nc | PR | live | 1e−4 | 1e−3 | 1e−2 | 3e−2 | 1e−1 | frozen | best |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.5 | 1.734 | 1.72e+03 | 1.45e+03 | 2.03e+02 | 2.77e+01 | **−7.27e+00** | −2.64e+01 | −2.99e+01 | stable |
+| 0.6 | 2.257 | 2.72e+03 | 2.29e+03 | 3.87e+02 | 3.45e+01 | 8.98e+00 | **−1.14e+00** | +7.00e+00 | stable |
+| 0.7 | 3.104 | 4.38e+03 | 3.69e+03 | 1.47e+03 | 8.64e+01 | 5.02e+01 | **+3.25e+01** | +4.41e+01 | **no** |
+| 0.8 | 4.436 | 6.69e+03 | 5.64e+03 | 3.00e+03 | 3.64e+02 | 1.01e+02 | **+6.75e+01** | +7.73e+01 | **no** |
+| 1.0 | 7.489 | 1.57e+04 | 1.34e+04 | 9.47e+03 | 5.32e+03 | 3.49e+03 | 1.62e+03 | **+1.14e+02** | **no** |
+
+There *is* an interior optimum — which is what §3.15's "non-monotonic τ" was
+seeing — but the window **closes at PR ≈ 2.3**. Small `τ` opens the acoustic
+loop of §3.11; large `τ` lands on the frozen rising branch; and from PR 3.1 the
+minimum over all `τ` is positive. **No first-order lag on the sensed triple can
+stabilise this closure.** That is an impossibility result, so the closure has to
+change rather than be tuned.
+
+**Two candidate structural fixes, measured.** Both follow from the mechanism,
+and their results are as informative as a success would have been.
+
+*Deliver the work against the live mass flow, keep the lookup lagged.* The row
+does fixed work per kilogram; the rate should follow the mass actually passing.
+Made **everything worse** — Nc 0.6 frozen +7.00 → +25.9, Nc 1.0 +114 → +289 —
+even though its 0D slope is stabilising. The difference between the 0D argument
+and the PDE is the **transport delay**: `W` is read twelve cells upstream, so
+the source answers a wave that passed ~1.5e−4 s ago, and negative feedback
+through a delay is an oscillator. The observed unfiltered growth rate at Nc 0.5,
+1/782 s, is about nine transits of that offset.
+
+*Weight the sources by the local cell mass flux.* Same idea with **zero** delay,
+and the sign reverses: the energy source improves every speed (Nc 0.7 frozen
++44.1 → +18.2; Nc 0.6 +7.00 → −13.4, i.e. stable). The momentum source must
+**not** be weighted this way — `d(ρu)/dt ∝ ρu` is exponential growth by
+construction, at rate `(Fx/W)/L_smear ≈ 1600/0.1 = 1.6e+04 /s`, which is what
+came out (1.6e+04 at Nc 0.8). Physically consistent: a blade row's axial force
+is the static pressure difference it holds, near enough independent of the
+instantaneous local momentum, so a fixed force is the right model for it.
+
+*Shorten the sampling offset.* Monotone at every speed. Minimum over `τ`, offset
+20 → 1: Nc 0.6 **+0.41 → −4.41** (unstable → stable), Nc 0.7 +36.0 → +25.5,
+Nc 0.8 +77.3 → +59.5. About 25%, real, not enough alone.
+
+**This one is not free**, and Phase 3 had already measured the price: the
+reconstruction stencil creates a numerical boundary layer *upstream* of the
+disk, so offset 1 reads `p₀₁` from inside it and biases the converged mass flow
+by **−3.3e−04**, against 7.5e−11 at offset 12 (Phase 3, "The sampling standoff,
+measured"). Buying 25% of a growth rate with seven orders of steady-state
+accuracy is not a trade worth making on its own; it is recorded here because it
+identifies the *delay* as a real contributor, which is what falsified the
+live-mass-flow fix below.
+
+*Stacked.* The two add but do not close the gap. Minimum over `τ`, both applied:
+Nc 0.7 +32.5 → **+10.4**, Nc 0.8 +67.5 → +44.2, Nc 1.0 unchanged at +73.8.
+Threefold, still a repeller.
+
+**Which frozen quantity is the branch — four devices, one slope each.** Pure
+algebra at the design point, `dp_exit/dW` normalised by `p_back/W`:
+
+| Nc | PR | fixed `Fx`, fixed `SWx` | fixed `Fx`, fixed `Δh₀` | fixed `PR`, fixed `Δh₀` | live map |
+| --- | --- | --- | --- | --- | --- |
+| 0.5 | 1.734 | −0.0326 | −0.0540 | −0.1083 | −1.2444 |
+| 0.6 | 2.257 | **+0.0054** | −0.0117 | −0.0653 | −1.2693 |
+| 0.7 | 3.104 | +0.0228 | **+0.0111** | −0.0362 | −1.7971 |
+| 0.8 | 4.436 | +0.0264 | +0.0190 | −0.0190 | −3.2821 |
+| 1.0 | 7.489 | +0.0216 | +0.0179 | −0.0077 | −66.7398 |
+
+The first two columns predict the eigenvalues **exactly**: the shipped device
+turns rising at PR 2.26 where the eigenvalue turns, and flux-weighted heat pushes
+that to PR 3.10, which is precisely where flux-Q stopped rescuing speeds (Nc 0.6
+stable, 0.7 not). The third column never rises — a device holding a pressure
+*ratio* and a *specific* work is statically stable at every speed, which is also
+what a map actually specifies. A force in newtons is only what that ratio is
+worth at one operating point.
+
+**And that device fails anyway, which is the most useful result here.**
+Implemented with the delay removed (`sample_offset` 1), the ratio device is
+*worse* than the shipped one above PR 2.3 — minimum over `τ`: +3.46 (Nc 0.6),
++42.9, +78.0, +134 (Nc 1.0), against −1.14, +32.5, +67.5, +114. So the 0D
+criterion that predicted columns one and two correctly **does not predict column
+three**. Something in the PDE that the lumped model cannot see is destabilising
+it, and the common factor is that the source is driven by a **point measurement
+of the flow**: any closure of that form carries a local feedback of rate
+`|∂(source)/∂(flux)| / L_smear`, which is 1e3–1e4 /s here regardless of sign
+conventions, while the lumped model assumes the whole system moves together.
+
+**Status.** Mechanism identified for the frozen branch; the remaining obstacle
+is now named and is structural. Neither the map, the mesh, the reconstruction,
+the boundaries nor the time integrator was ever the problem. The next thing to
+try is a closure that is **local**: a source in cell `k` computed from the state
+in cell `k`, as throughflow body-force models do, rather than from a remote
+sample. The one piece of evidence already pointing that way is that
+flux-weighted heat — the only genuinely local variant tried — is also the only
+one that improved every speed.
+
+### 3.17 Implicit integration — what it buys, and what it cannot
+
+Backward Euler, BDF2 and variable-step SDIRK3 (Alexander's L-stable, stiffly
+accurate three-stage scheme), all Newton–Krylov and matrix-free because the
+source is non-local and the Jacobian is therefore not block-tridiagonal.
+
+Measured temporal order against a finely-stepped reference, halving `dt`:
+
+| scheme | rates, coarse → fine | with reconstruction forced 1st order |
+| --- | --- | --- |
+| backward Euler | 0.39, 0.54, 0.69, 0.81 | 0.87 |
+| BDF2 | 0.71, 0.97, 1.27, 1.63 | 2.06 |
+| SDIRK3 | 1.62, 2.21, 2.68, 2.89 | 2.97 |
+
+Each reaches its design order, and the approach is slow because the van Albada
+limiter is only piecewise differentiable — until the step is small enough that
+no face changes limiter branch during it, every scheme reads one order low. The
+first-order column is what identifies the limiter as the cause rather than a
+coefficient slip, and it is why `tests/test_implicit.py` measures order at
+n = 16, 32, 64 rather than 4, 8, 16.
+
+**What it buys.** Freedom from the CFL limit on the stable range: 50× the
+explicit step from a perturbed state, and a residual driven to round-off in tens
+of steps rather than tens of thousands. `ImplicitStepper` is also the natural
+place to converge a design point before a stability measurement.
+
+**What it cannot buy.** The high-PR blockage. §3.16 shows the target is a
+repeller, and an A-stable scheme integrating toward a repeller still leaves it —
+A-stability bounds the response to *stable* modes and says nothing about
+unstable ones. Backward Euler getting 5× further in physical time than explicit
+was never evidence of progress; it was a slower walk down the same unstable
+manifold.
 
 ### 3.4 Measured cost of the alternatives
 
