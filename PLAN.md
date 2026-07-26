@@ -1076,6 +1076,87 @@ sample. The one piece of evidence already pointing that way is that
 flux-weighted heat — the only genuinely local variant tried — is also the only
 one that improved every speed.
 
+### 3.18 The fix: lag the operating point, never the level
+
+§3.16 leaves one question: what closure is both statically stable *and* free of
+the fast loop? The answer follows from the corrected-parameter framework the
+whole project is built on, and it is a **correctness** repair, not a stabiliser.
+
+`Fx` and `SWx` are computed from the *lagged* sample. Injecting them as a fixed
+force in newtons and a fixed heat rate in watts freezes the dimensional **level**
+along with the operating point — and a map says nothing about levels. It asserts
+a pressure *ratio* and a corrected work, both invariant to the absolute pressure
+and to the mass flow. So the shipped injection is not a compressor: raise the
+local pressure 10% and the map demands 10% more pressure rise, while a fixed
+force delivers the same absolute rise. That inconsistency *is* the rising branch.
+
+The repair is to lag the dimensionless operating point and never the dimensional
+scale factors:
+
+```
+q_ρu(k) = (Fx/n) · p_k / p̄_k          p̄ = lagged local static pressure
+q_ρE(k) = (SWx/n) · m_k / m̄_k         m̄ = lagged local mass flux
+```
+
+Both evaluated from the **local** state of the cell being forced — local is
+essential, since the same corrections driven from the upstream probe make every
+eigenvalue worse (§3.16). Both ratios are one at *any* steady state, so the
+operating point is untouched and every Phase 3 gate still holds.
+
+**The reference is a lag of the field, not a prediction of it.** The first
+version integrated the expected profile across the smear from the map point,
+which is exact to the flux inversion but not to the discretisation, and the
+leftover mismatch biased the converged mass flow by **−5.5e−04** — three orders
+outside the Phase 3 gate. Referencing the field against its own past cannot
+drift, because at convergence past and present are the same field.
+
+**Measured.** Largest eigenvalue of the linearised design state, `HPC01`:
+
+| Nc | PR | fixed force / rate | similarity-scaled |
+| --- | --- | --- | --- |
+| 0.6 | 2.257 | +7.00e+00 | **−6.98e+01** |
+| 0.7 | 3.104 | +4.41e+01 | **−5.39e+01** |
+| 0.8 | 4.436 | +7.73e+01 | **−3.90e+01** |
+| 0.9 | 5.991 | +9.99e+01 | **−2.75e+01** |
+| 1.0 | 7.489 | +1.14e+02 | **−1.91e+01** |
+
+Stable at every speed to PR 7.49. Two implementations — the library's and an
+independent scratchpad wrapper — agree to all printed digits, which is what
+rules out a bug in the rig.
+
+Nonlinearly, on the committed `data/maps/SubsonicCompressor.xlsx` at Nc 1.0,
+PR 2.141: unscaled reaches W = −1.03e−02 and is still drifting at −2.2e−02;
+scaled **holds at +3.69e−10 with 5.1e−11 drift**. That case is now the gate in
+`tests/test_similarity.py`, with the negative half asserted explicitly.
+
+On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
+0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
+steps 3763 and 362 are gone.
+
+**What is not fixed.** Above PR ≈ 2.4 the runs survive but settle into a
+**limit cycle** rather than the design point: at `HPC01` Nc 0.8 the mass flow
+oscillates ±7e−3 with a period near 0.16 s, steady in amplitude over 40,000
+steps. The linearisation says −38.96, so this is not the same instability; it is
+nonlinear and it is not yet explained. Two candidates, both open:
+
+* the linearisation freezes `LocalLevelFilter` along with everything else, so it
+  is the `τ_level → ∞` limit and says nothing about the level filter's own
+  dynamics. A first attempt to put those states into the eigenvalue problem
+  disagreed with the validated frozen limit (+37.0 against −38.96 at Nc 0.8) and
+  is therefore **wrong**; its numbers are not recorded here.
+* **map-end clamping.** At Nc 0.9 the trace shows `beta` hitting exactly 0.0000
+  with `PR` pinned at the speed line's end value 4.6161, repeatedly. That is a
+  non-smooth bound, and non-smooth bounds sustain limit cycles. It is also the
+  original "suspect 1", reappearing for a different reason.
+
+**The continuation ramp is the wrong tool for the startup.** Bringing the source
+up from zero against a back pressure sized for full PR blows up at steps 286 and
+334 where starting at full strength survives — the weak-source state is nowhere
+near the design point and has to travel back. Pseudo-transient continuation with
+the implicit stepper is the better route and is only half-built: Newton stops
+converging near dt = 5.6e−2 s (~2600 CFL steps) because the preconditioner is
+diagonal, which is exactly the limitation §3.17 records.
+
 ### 3.17 Implicit integration — what it buys, and what it cannot
 
 Backward Euler, BDF2 and variable-step SDIRK3 (Alexander's L-stable, stiffly

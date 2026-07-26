@@ -131,6 +131,57 @@ class InletFilter:
         return self._T0, self._p0, self._W
 
 
+@dataclass
+class LocalLevelFilter:
+    """First-order lag on the **local** static pressure and mass flux per cell.
+
+    Its only job is to supply a reference *level* for the similarity scaling in
+    :class:`InletFlowCompressor`. The source is injected as
+
+        ``Fx · p_k / p̄_k``   and   ``SWx · m_k / m̄_k``
+
+    with ``p̄`` and ``m̄`` the lagged values from here, so both ratios are
+    **exactly one at any steady state**, whatever the discrete profile happens to
+    be. That last property is why the reference is a lag of the field itself
+    rather than an analytic prediction of it: an earlier version integrated the
+    expected profile across the smear from the map point, which is right to the
+    accuracy of the flux inversion but not to the accuracy of the discretisation,
+    and the leftover mismatch biased the converged mass flow by −5.5e−04 — three
+    orders outside the Phase 3 gate. Referencing the field against its own past
+    cannot drift, because at convergence past and present are the same field.
+
+    Dynamically it is what makes the source scale with the pressure *level* it
+    actually sits in, on the same time constant as the operating point. Frozen
+    within a step, exactly as :class:`InletFilter` is, so a Newton or Runge-Kutta
+    stage sees one reference.
+
+    ``tau = 0`` disables it and returns the field itself, giving ratios of one
+    and the unscaled fixed-force injection.
+    """
+
+    tau: float = 0.0
+
+    _p: np.ndarray | None = field(init=False, repr=False, default=None)
+    _m: np.ndarray | None = field(init=False, repr=False, default=None)
+    _t: float = field(init=False, repr=False, default=math.nan)
+
+    def reset(self) -> None:
+        self._p = self._m = None
+        self._t = math.nan
+
+    def update(self, t: float, p: np.ndarray, m: np.ndarray):
+        if self.tau <= 0.0:
+            return p, m
+        if self._p is None:
+            self._p, self._m, self._t = p.copy(), m.copy(), t
+        elif t > self._t:
+            alpha = 1.0 - math.exp(-(t - self._t) / self.tau)
+            self._t = t
+            self._p += alpha * (p - self._p)
+            self._m += alpha * (m - self._m)
+        return self._p, self._m
+
+
 def rotor_period(rpm: float) -> float:
     """``tau = 1/N`` in seconds — a defensible blade-row response time.
 
@@ -551,6 +602,41 @@ class InletFlowCompressor:
 
     The map supplies ``PR`` and **corrected work** ``Δh₀/θ``, so the energy
     source is ``SWx = W·Δh₀`` with no isentropic inversion in the path.
+
+    **Similarity scaling** (``similarity_scaling``, default on) is what lets this
+    hold above PR 2.3, and it is a correctness fix rather than a stabiliser.
+    ``Fx`` and ``SWx`` are computed from the *lagged* sample, so injecting them
+    as a fixed force in newtons and a fixed heat rate in watts freezes the
+    dimensional **level** along with the operating point. That contradicts the
+    map: a map asserts a pressure *ratio* and a corrected work, both invariant to
+    the absolute pressure level and to the mass flow. A device holding newtons
+    fixed is not a compressor — it is a rising branch from PR 2.26, and a device
+    holding watts fixed runs away because ``Δh₀ = Ẇ/W`` grows as the flow falls
+    (``PLAN.md`` §3.16).
+
+    The repair is to lag the *dimensionless* operating point and never the
+    dimensional scale factors, so the source is injected as
+
+    .. math::
+
+        q_\\rho u(k) = \\frac{F_x}{n}\\,\\frac{p_k}{p_k^\\text{expected}},
+        \\qquad
+        q_{\\rho E}(k) = \\frac{\\dot S_{Wx}}{\\dot m}\\,
+                         \\frac{(\\rho u A)_k}{n},
+
+    both evaluated from the **local** state of the cell being forced. Local
+    matters: the same corrections driven from the upstream probe make every
+    eigenvalue worse, because that path carries a transport delay (§3.16).
+
+    Both ratios are one at the design point, so the operating point and every
+    Phase 3 gate are unchanged; only ``dR/dU`` moves. Measured on ``HPC01``, the
+    largest eigenvalue of the linearised steady state goes from +7.0, +44.1,
+    +77.3, +99.9, +114.4 to **−69.8, −53.9, −39.0, −27.5, −19.1** at Nc 0.6
+    through 1.0, i.e. PR 2.26 through 7.49.
+
+    ``similarity_scaling=False`` restores the fixed-force, fixed-rate injection.
+    It exists so the regression test can assert that the old form *fails*, and
+    is not a supported configuration.
     """
 
     cell: int
@@ -559,6 +645,7 @@ class InletFlowCompressor:
     sample_offset: int = 12
     n_smear: int = 1
     inlet_lag: float = 0.0
+    similarity_scaling: bool = True
     ramp_evaluations: int = 0
     last: MappedDiskState = field(default_factory=MappedDiskState)
 
@@ -566,9 +653,11 @@ class InletFlowCompressor:
     _filter: InletFilter = field(init=False, repr=False, default=None)
     _calls: int = field(init=False, repr=False, default=0)
     _reversals: int = field(init=False, repr=False, default=0)
+    _levels: "LocalLevelFilter" = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         self._filter = InletFilter(self.inlet_lag)
+        self._levels = LocalLevelFilter(self.inlet_lag)
         if self.n_smear < 1:
             raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
         if self.sample_offset < 1:
@@ -660,8 +749,15 @@ class InletFlowCompressor:
 
         q = np.zeros((3, n))
         span = slice(self.cell, self.cell + self.n_smear)
-        q[1, span] = ramp * Fx * self._weights
-        q[2, span] = ramp * SWx * self._weights
+        if self.similarity_scaling:
+            p_now = solver.p[1:-1][span]
+            m_now = solver.cv[1, 1:-1][span]
+            p_ref, m_ref = self._levels.update(solver.t, p_now, m_now)
+            q[1, span] = ramp * Fx * self._weights * (p_now / p_ref)
+            q[2, span] = ramp * SWx * self._weights * (m_now / m_ref)
+        else:
+            q[1, span] = ramp * Fx * self._weights
+            q[2, span] = ramp * SWx * self._weights
         return q
 
 
