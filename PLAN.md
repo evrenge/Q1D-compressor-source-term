@@ -468,11 +468,35 @@ the duct was designed for.
 0.528, then 1.7e-01 at 0.661; from 0.880 up the inlet closure refuses to run at
 all because `Wc` is not invertible there.
 
-**The boundary is the loop gain crossing one.** Eight orders of magnitude of
-accuracy are lost between Nc = 0.672 (gain 0.78, held to 4e-8) and Nc = 0.728
-(gain 0.95, off by 2%). Nothing else changes across that boundary — same mesh,
-same smear, same seed, same source magnitude trend. This is the first
-*prediction* the loop-gain analysis has made rather than explained.
+**The boundary is NOT the logarithmic loop gain.** An earlier version of this
+section claimed it was, generalising from `SubsonicCompressor` alone.
+`TranssonicCompressor` refutes it: it *holds* at `dlnFx/dlnW` = −4.41 (Nc 0.359)
+and −3.38 (Nc 0.528) while `SubsonicCompressor` *fails* at −0.95 (Nc 0.728).
+The logarithmic gain does not separate the data.
+
+**The boundary is the acoustic impedance ratio.** A mass-flow perturbation `dW`
+in a duct carries a force perturbation `c·dW`, so the duct's characteristic
+impedance, as a force per unit mass flow, is the speed of sound. The disk
+responds with `dFx/dW`, also a velocity, and negative. The group is
+
+    Z = |dFx/dW| / c
+
+| Nc | 0.330 | 0.530 | 0.672 | 0.728 | 0.833 | 1.000 | 1.100 | 1.200 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Subsonic Z | 0.057 | 0.266 | **0.597** | **0.879** | 1.61 | 6.56 | 20.5 | 81.6 |
+| verdict | held | held | held | no | no | no | blew up | blew up |
+
+| Nc | 0.359 | 0.528 | 0.661 | 0.791 |
+| --- | --- | --- | --- | --- |
+| Transsonic Z | 0.601 | **1.31** | 2.98 | 13.3 |
+| verdict | held | held | no | no |
+
+Every held case has `Z ≤ 1.31`, every failure `Z ≥ 0.879`: one overlapping
+pair, otherwise a clean split at `Z ≈ 1`. When `|dFx/dW| > c` the disk returns
+more to an acoustic wave than the wave brought it — a **negative acoustic
+resistance** — so reflected waves grow. That is scale-invariant and independent
+of mesh, smear, standoff and timestep, which is exactly the pattern every
+experiment showed.
 
 **Remedies tried.** A first-order lag of time constant `τ` on the applied
 source — the textbook fix for a delayed loop, and one with unit DC gain, so the
@@ -504,8 +528,40 @@ touch it either. Two independent remedies failing the same way, mesh-
 independently, is evidence that above `|dlnFx/dlnW| ≈ 1` the difficulty is in
 the **problem**, not the discretisation of it.
 
-**Leading hypothesis, not yet a conclusion: the exit boundary is a degenerate
-throttle.** A fixed static back pressure has a horizontal characteristic in the
+**Two further tests, one refuted, one ill-posed — both recorded because they
+were run.**
+
+*The map-end clamp is not the mechanism.* `evaluate_at_Wc` returns the end point
+outside the tabulated range, which is a hard nonlinearity that could in
+principle sustain a limit cycle. It does not. At Z = 0.879 the lookup leaves the
+map in 1.1% of evaluations and only after 72% of the run — the oscillation is
+fully grown by then — and replacing the clamp with linear extrapolation off the
+end slope moves the answer from 2.08e-02 to 1.75e-02. At Z = 6.56 extrapolation
+is strictly *worse*: it drives the state past choke (Φ = 0.696 against Φmax
+0.685) and the run dies. Clamping onset collapses with Z (72% → 11% → 2% of the
+run), which is the signature of a growing instability that starts inside the
+map, not a clamp-driven cycle.
+
+*Shrinking the artificial delays helps but does not fix.* The 12-cell standoff
+was measured in Phase 3 for a **one-cell** disk, and the 81-cell smear is 20% of
+the duct where a blade row is ~1%; both were chosen for accuracy with no regard
+for the loop. Cutting them to 2.6%/0.25% of the duct is worth 35× at Z = 1.61
+(2.77e-01 → 7.92e-03) and 73× at Z = 0.879 (2.08e-02 → 2.85e-04). Neither
+reaches the 1e-6 hold criterion, and the residual error is **non-monotone in
+mesh** at fixed physical smear (7.9e-03 → 1.1e-02 → 4.3e-02 over 801 → 1601
+cells), which is a limit cycle of reduced amplitude, not a converging solution.
+
+*The duct-length sweep is a null test.* It returned bit-identical results at
+L = 0.125, 0.25 and 0.5 m — same mass flow to the last digit, same clamp
+fraction, same step count. That is not insensitivity: the problem is **invariant
+under length scaling**, because the source is a total (N, W) spread over cells
+whose volume scales with L, so source-per-volume and flux divergence both go as
+1/L and changing L only rescales time. There is no intrinsic time scale to
+compare against, which is why the *lag* test was meaningful — `τ` is a fixed
+physical time — and why this one could not be. The test should not have been
+run; it is recorded so the same mistake is not repeated.
+
+**Superseded hypothesis: the exit boundary is a degenerate throttle.** A fixed static back pressure has a horizontal characteristic in the
 (W, p) plane — it supplies no restoring pressure when the flow moves, which is
 the least stabilising exit condition there is. A real throttle is an *area*:
 pass more flow through it and the pressure it demands rises. On a steep speed
@@ -525,6 +581,17 @@ callback, so it is updated within the Runge-Kutta stages rather than as a
 proper characteristic outlet; the blow-up at large `k` is that coupling going
 unstable, not the physics rejecting a stiff throttle. A real nozzle boundary
 condition is needed before the hypothesis can be called confirmed or refuted.
+
+**What this means for the model.** `Z ≈ 1` is not a numerical group. A real
+blade row does not present its steady-state `dFx/dW` to a kilohertz acoustic
+wave — its unsteady response rolls off with reduced frequency. Our disk presents
+the full steady slope at every frequency, which is physically impossible, and is
+what makes it a wave amplifier above `Z = 1`. **A quasi-steady map is not a
+valid unsteady boundary condition**, and that is a modelling gap, not a bug to
+be found. It also reframes the lag: a low-pass on the disk's response is the
+right *family* of fix, because it is what the real physics does. `τ` was picked
+by trial rather than derived, which is why it worked at Z = 0.879 and not at
+Z = 1.61.
 
 **Status.** Half resolved, and the half that works is measured rather than
 asserted: a real map drives the solver to its own operating point to 1e-11 in
@@ -1089,16 +1156,23 @@ D10.
 
 ## 8. Known gaps
 
-- **Phase 5 stops at `|dlnFx/dlnW| ≈ 1`.** Below it a real map is held to 1e-11
-  in mass flow with 1e-12 drift; above it the operating point is not held, at
-  any mesh from 201 to 1601 cells and with either remedy tried (§3.9). On
+- **Phase 5 stops at `Z = |dFx/dW|/c ≈ 1`.** Below it a real map is held to
+  1e-11 in mass flow with 1e-12 drift; above it the operating point is not held
+  at any mesh from 201 to 1601 cells, at any smear from 1.3% to 20% of the duct,
+  at any standoff from 0.12% to 3%, or with any remedy tried (§3.9). On
   `SubsonicCompressor` that is Nc ≤ 0.672 of 12 speed lines; on
   `TranssonicCompressor`, Nc ≤ 0.528 of 9, with the top five refusing the inlet
   closure outright because `Wc` is not invertible there. **Nothing above those
-  speeds should be trusted or reported as working.** Next tests, in order: a
-  proper nozzle outlet (the current throttle test is confounded by updating the
-  boundary inside the RK stages); then, if that fails, whether a quasi-steady
-  map is the wrong closure for a near-vertical speed line at all.
+  speeds should be trusted or reported as working.** The question is no longer
+  "where is the bug" — `Z` is the acoustic-impedance criterion and the disk is a
+  wave amplifier above it — but "what unsteady compressor response replaces the
+  quasi-steady map". That is the next piece of modelling, not the next debugging
+  session.
+- **An earlier claim in this document was wrong and is corrected in §3.9.** The
+  boundary was reported as `|dlnFx/dlnW| ≈ 1`, generalised from
+  `SubsonicCompressor` alone. `TranssonicCompressor` holds at −4.41 and −3.38
+  while `SubsonicCompressor` fails at −0.95, so the logarithmic gain does not
+  separate the data; `Z` does.
 - **The lag is a steady-state device only.** A first-order lag with `τ = 1e-2 s`
   restores the hold at gain 0.95, and its unit DC gain means the converged point
   is exact. But `τ` is the same order as the settling time, so it is *not*
