@@ -28,6 +28,7 @@ from q1d.analytic import (
     mach_from_flow_function,
     max_flow_function,
     minimum_back_pressure,
+    state_from_flux,
     static_from_stagnation,
     zero_d_compressor,
 )
@@ -636,3 +637,77 @@ def test_lower_efficiency_costs_more_power_for_the_same_pressure_ratio():
     _, sw_poor = compressor_source_terms(T01, P01, 10.0, PR, 0.7, A1, A2, GAS)
     assert sw_poor > sw_good
     assert sw_poor / sw_good == pytest.approx(0.9 / 0.7, rel=1e-12)
+
+
+# -- flux inversion ---------------------------------------------------------
+
+
+class TestStateFromFlux:
+    """``state_from_flux`` is the inverse of the flux function."""
+
+    @staticmethod
+    def _flux(st, A, gas):
+        return (
+            st.rho * st.u * A,
+            (st.rho * st.u**2 + st.p) * A,
+            st.rho * st.u * (gas.cp * st.T + 0.5 * st.u**2) * A,
+        )
+
+    @pytest.mark.parametrize("M", [0.05, 0.2, 0.45, 0.7, 0.95])
+    @pytest.mark.parametrize("A", [0.3, 1.0, 7.5])
+    def test_round_trips_the_subsonic_branch(self, M, A):
+        gas = GAS
+        st = static_from_stagnation(
+            300.0, 2.0e5, flow_function(M, gas) * A * 2.0e5 / math.sqrt(gas.R * 300.0), A, gas
+        )
+        got = state_from_flux(self._flux(st, A, gas), A, gas)
+        assert got.rho == pytest.approx(st.rho, rel=1e-12)
+        assert got.u == pytest.approx(st.u, rel=1e-12)
+        assert got.p == pytest.approx(st.p, rel=1e-12)
+        assert got.M == pytest.approx(M, rel=1e-10)
+
+    @pytest.mark.parametrize("M", [1.2, 2.0, 3.5])
+    def test_round_trips_the_supersonic_branch(self, M):
+        gas = GAS
+        A = 1.0
+        st = static_from_stagnation(
+            300.0,
+            2.0e5,
+            flow_function(M, gas) * A * 2.0e5 / math.sqrt(gas.R * 300.0),
+            A,
+            gas,
+            supersonic=True,
+        )
+        got = state_from_flux(self._flux(st, A, gas), A, gas, supersonic=True)
+        assert got.M == pytest.approx(M, rel=1e-9)
+
+    def test_the_two_roots_are_the_two_branches_of_the_same_flux(self):
+        """One flux vector, two states — the Rankine-Hugoniot pair.
+
+        Both exist only where the supersonic partner has positive pressure. A
+        deeply subsonic state has no conjugate: its partner would need
+        ~2300 m/s and a negative static pressure, and is correctly discarded.
+        """
+        gas = GAS
+        A = 1.0
+        W = flow_function(1.5, gas) * A * 2.0e5 / math.sqrt(gas.R * 300.0)
+        sup = static_from_stagnation(300.0, 2.0e5, W, A, gas, supersonic=True)
+        f = self._flux(sup, A, gas)
+        lo = state_from_flux(f, A, gas)
+        hi = state_from_flux(f, A, gas, supersonic=True)
+        assert lo.M < 1.0 < hi.M
+        # same mass, momentum and energy flux, different state
+        for got in (lo, hi):
+            assert self._flux(got, A, gas)[0] == pytest.approx(f[0], rel=1e-12)
+            assert self._flux(got, A, gas)[1] == pytest.approx(f[1], rel=1e-12)
+            assert self._flux(got, A, gas)[2] == pytest.approx(f[2], rel=1e-12)
+
+    def test_rejects_a_flux_no_state_can_produce(self):
+        with pytest.raises(InfeasibleOperatingPoint):
+            state_from_flux((10.0, 1.0, 1e12), 1.0, GAS)
+
+    def test_rejects_non_positive_mass_flux_and_area(self):
+        with pytest.raises(ValueError, match="mass flux"):
+            state_from_flux((0.0, 1.0, 1.0), 1.0, GAS)
+        with pytest.raises(ValueError, match="area"):
+            state_from_flux((1.0, 1.0, 1.0), 0.0, GAS)

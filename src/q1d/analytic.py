@@ -22,6 +22,7 @@ mismatch that corrupted the prototype's lookup is unrepresentable in terms of
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .gas import PerfectGas
@@ -52,6 +53,7 @@ __all__ = [
     "max_flow_function",
     "mach_from_flow_function",
     "static_from_stagnation",
+    "state_from_flux",
     "choked_mass_flow",
     "compressor_exit_stagnation",
     "compressor_source_terms",
@@ -330,6 +332,63 @@ def static_from_stagnation(
     rho = p / (gas.R * T)
     c = gas.speed_of_sound(T)
     return StaticState(p=p, T=T, rho=rho, u=M * c, M=M, c=c)
+
+
+def state_from_flux(
+    flux: Sequence[float], A: float, gas: PerfectGas, supersonic: bool = False
+) -> StaticState:
+    """Invert the conservative flux vector — the reverse of the flux function.
+
+    Given ``[rho u A, (rho u^2 + p) A, rho u H A]`` recover the state that
+    produces it. Needed to construct the interior profile of a *smeared*
+    actuator disk: the steady flux balance ``F_{k+1} = F_k + q_k`` gives the
+    face fluxes exactly, and this turns them back into cell states. A seed built
+    that way has a residual of ~1e-5 of the source scale through the smear
+    region, against ~1 for a sharp two-state profile — which is not a discrete
+    steady state at all, because a single cell cannot simultaneously present
+    station 1 to its left face and station 2 to its right face.
+
+    With ``m = rho u`` and ``P = rho u^2 + p``, energy conservation gives a
+    quadratic in ``u``::
+
+        m (1/2 - cp/R) u^2 + (cp/R) P u - m cp T0 = 0
+
+    whose two positive roots are the subsonic and supersonic states passing the
+    same flux. The subsonic one is returned unless ``supersonic`` is set.
+    """
+    if A <= 0.0:
+        raise ValueError(f"area must be positive, got {A!r}")
+    m, P, E = flux[0] / A, flux[1] / A, flux[2] / A
+    if m <= 0.0:
+        raise ValueError(f"mass flux must be positive, got {m!r}")
+
+    a = gas.g_over_gm1  # cp/R
+    qa, qb, qc = m * (0.5 - a), a * P, -E
+    disc = qb * qb - 4.0 * qa * qc
+    if disc < 0.0:
+        raise InfeasibleOperatingPoint(
+            f"no state produces this flux: discriminant {disc:.6g} < 0 at "
+            f"m={m:.6g}, P={P:.6g}, E={E:.6g}"
+        )
+    roots = ((-qb + math.sqrt(disc)) / (2.0 * qa), (-qb - math.sqrt(disc)) / (2.0 * qa))
+
+    found = []
+    for u in roots:
+        if u <= 0.0:
+            continue
+        p = P - m * u
+        if p <= 0.0:
+            continue
+        rho = m / u
+        T = p / (rho * gas.R)
+        c = gas.speed_of_sound(T)
+        found.append(StaticState(p=p, T=T, rho=rho, u=u, M=u / c, c=c))
+    if not found:
+        raise InfeasibleOperatingPoint(
+            f"no physical state produces this flux (roots {roots}) at m={m:.6g}, P={P:.6g}"
+        )
+    found.sort(key=lambda s: s.M)
+    return found[-1] if supersonic else found[0]
 
 
 def choked_mass_flow(p0: float, T0: float, A: float, gas: PerfectGas) -> float:

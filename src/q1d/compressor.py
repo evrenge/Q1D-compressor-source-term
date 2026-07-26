@@ -39,6 +39,7 @@ __all__ = [
     "ActuatorDisk",
     "MappedCompressor",
     "MappedDiskState",
+    "InletFlowCompressor",
 ]
 
 
@@ -378,6 +379,138 @@ class MappedCompressor:
         # This is a numerical device for reaching steady state, not physics --
         # it scales to 1 well before convergence and has no effect on the
         # converged answer, which the hold test confirms.
+        self._calls += 1
+        ramp = 1.0
+        if self.ramp_evaluations > 0:
+            ramp = min(1.0, self._calls / float(self.ramp_evaluations))
+
+        q = np.zeros((3, n))
+        span = slice(self.cell, self.cell + self.n_smear)
+        q[1, span] = ramp * Fx * self._weights
+        q[2, span] = ramp * SWx * self._weights
+        return q
+
+
+@dataclass
+class InletFlowCompressor:
+    """Compressor driven by a real β map, keyed on **inlet** corrected flow.
+
+    This is the closure the Q1D solver uses. :class:`MappedCompressor` keys on
+    exit corrected flow, which is the right coordinate for a cycle code and the
+    wrong one here: the exit state is produced by this source, so keying on it
+    closes an algebraic loop through the source's own output. Measured loop gain
+    ``-dlnPR/dlnECMF`` is 0.90 at design speed on ``SubsonicCompressor`` and
+    1.02–1.10 across the top of ``TranssonicCompressor``. Above one the loop
+    diverges for *every* under-relaxation factor, and it does: the ECMF closure
+    oscillates 16 → 32 → 24 → 35 → 16 in ECMF at CFL 0.2, 0.1 and 0.05 alike,
+    which is what rules out a timestep explanation.
+
+    Here the only measurement is upstream, where the field is clean to ~1e-8
+    (``PLAN.md`` Phase 3). There is no algebraic feedback at all — the source
+    depends on the solver's state only through the physical dynamics, which are
+    restoring: more flow → lower PR → lower exit static pressure against a fixed
+    back pressure → the flow decelerates.
+
+    The map supplies ``PR`` and **corrected work** ``Δh₀/θ``, so the energy
+    source is ``SWx = W·Δh₀`` with no isentropic inversion in the path.
+    """
+
+    cell: int
+    beta_map: object  # BetaMap; annotated loosely to avoid a circular import
+    corrected_speed: float
+    sample_offset: int = 12
+    n_smear: int = 1
+    ramp_evaluations: int = 0
+    last: MappedDiskState = field(default_factory=MappedDiskState)
+
+    _weights: np.ndarray = field(init=False, repr=False, default=None)
+    _calls: int = field(init=False, repr=False, default=0)
+    _reversals: int = field(init=False, repr=False, default=0)
+
+    def __post_init__(self) -> None:
+        if self.n_smear < 1:
+            raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
+        if self.sample_offset < 1:
+            raise ValueError("sample_offset must be >= 1 so the disk cell itself is not read")
+        if not self.beta_map.inlet_closure_is_invertible(self.corrected_speed):
+            # Fail at construction, not a thousand steps into a run.
+            self.beta_map.evaluate_at_Wc(1.0, self.corrected_speed)
+        self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
+
+    @property
+    def reversals(self) -> int:
+        """Evaluations skipped because the sampled station had reverse flow."""
+        return self._reversals
+
+    def __call__(self, solver: Solver) -> np.ndarray:
+        from .analytic import static_from_stagnation
+        from .maps import P_REF, T_REF
+
+        gas = solver.gas
+        grid = solver.grid
+        n = grid.n_interior
+        last_cell = self.cell + self.n_smear - 1
+        if self.cell - self.sample_offset < 0 or last_cell >= n:
+            raise ValueError(
+                f"disk at cell {self.cell} spanning {self.n_smear} cells with sample_offset "
+                f"{self.sample_offset} does not fit in {n} interior cells"
+            )
+        area = float(grid.a_face[self.cell])
+        if not np.all(grid.a_face[self.cell : last_cell + 2] == area):
+            raise ValueError("area varies across the disk cells; see PLAN.md §4.5")
+
+        i = self.cell - self.sample_offset + 1
+        rho, u, p, c = solver.primitives()
+        rho_i, u_i, p_i = float(rho[i]), float(u[i]), float(p[i])
+        T = p_i / (rho_i * gas.R)
+        mach = u_i / float(c[i])
+        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
+        p01 = p_i * (T01 / T) ** gas.g_over_gm1
+        W = rho_i * u_i * float(grid.a_cell[i])
+
+        # A startup transient can momentarily reverse the flow at the sampling
+        # station. The map has no meaning there, so the source is switched off
+        # for that evaluation and the event counted; a run that converges with
+        # reversals recorded is not to be trusted without inspecting them.
+        if W <= 0.0:
+            self._reversals += 1
+            self.last = MappedDiskState(W=W, T01=T01, p01=p01)
+            return np.zeros((3, n))
+
+        theta, delta = T01 / T_REF, p01 / P_REF
+        Wc = W * math.sqrt(theta) / delta
+        point = self.beta_map.evaluate_at_Wc(Wc, self.corrected_speed)
+
+        dh0 = point.corrected_work * theta
+        T02 = T01 + dh0 / gas.cp
+        p02 = point.PR * p01
+
+        st1 = static_from_stagnation(T01, p01, W, area, gas)
+        st2 = static_from_stagnation(T02, p02, W, area, gas)
+        Fx = (st2.p - st1.p) * area + W * (st2.u - st1.u)
+        SWx = W * dh0
+
+        self.last = MappedDiskState(
+            phi1=W * math.sqrt(gas.R * T01) / (area * p01),
+            W=W,
+            T01=T01,
+            p01=p01,
+            PR=point.PR,
+            eta=point.efficiency,
+            Fx=Fx,
+            SWx=SWx,
+            beta=point.beta,
+            corrected_speed=self.corrected_speed,
+            ecmf=point.ecmf,
+            Wc=Wc,
+            corrected_work=point.corrected_work,
+            M2=st2.M,
+            T02=T02,
+        )
+
+        # Continuation ramp: a numerical device for reaching steady state, not
+        # physics. It reaches 1 well before convergence, so the converged answer
+        # does not depend on it -- which the hold test confirms.
         self._calls += 1
         ramp = 1.0
         if self.ramp_evaluations > 0:

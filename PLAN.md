@@ -385,6 +385,78 @@ Across speed lines the `N_c` normalisation is a wash — `L/N_c^k` for
 denominator is worth having for *definedness* — unlike η it never has a zero
 denominator — but it buys nothing for interpolation. `k = 0` stands.
 
+### 3.9 Driving the solver from a real map — what actually blocks it
+
+Phase 3 reached its gate with a *constant* map at `PR = 1.2`, `Fx = 1731 N`. A
+real map at design speed asks for `PR = 2.14` and `Fx = 34,964 N` through the
+same kind of duct, and that is a different problem. Three separate obstacles
+were found, and it matters that they are separate — each of the first two was
+briefly mistaken for the others.
+
+**(a) A sharp two-state seed is not a discrete steady state.** Cell `i` cannot
+present station 1 to its left face and station 2 to its right face at once, so
+a one-cell jump leaves the disk cell out of balance by the entire source.
+Integrating the steady flux balance `F_{k+1} = F_k + q/n_smear` across the smear
+region and inverting each face flux (`analytic.state_from_flux`,
+`design.steady_profile`) gives the profile the solver is looking for. Measured
+at `n_smear = 21`: residual 1e-5 to 1e-4 of the source scale through the smear
+interior, against ~1 for the sharp seed. What remains is 1–3% at the two kinks
+where the ramp meets the uniform regions — the limiter reacting to a slope
+discontinuity.
+
+**(b) The exit-corrected-flow closure is circular.** ECMF is the right
+coordinate for a cycle code, where the exit state is known independently.
+Inside the solver the exit state is produced by this very source, so keying on
+it closes an algebraic loop through the source's own output, with gain
+`−dlnPR/dlnECMF`:
+
+| Nc | 0.53 | 0.73 | 0.93 | 1.00 | 1.10 | 1.20 |
+| --- | --- | --- | --- | --- | --- | --- |
+| SubsonicCompressor | 0.25 | 0.50 | 0.81 | 0.90 | 0.98 | **1.02** |
+| TranssonicCompressor | 0.76 | 0.91 | 1.07 | **1.09** | — | — |
+
+Above one the loop diverges for *every* under-relaxation factor: under-relaxing
+a positive-gain loop gives `|1 + r(g − 1)| > 1` for all `r > 0`. Observed as an
+ECMF oscillation 16 → 32 → 24 → 35 → 16 that is unchanged at CFL 0.2, 0.1 and
+0.05, which is what rules out a timestep explanation.
+
+**(c) The inlet closure is non-circular but ill-conditioned.** `maps.evaluate_at_Wc`
+measures only upstream, where the field is clean to ~1e-8, so there is no
+algebraic loop at all. The price is that the source's sensitivity to the
+measured flow, `dlnFx/dlnW`, is set by the slope of the speed line:
+
+| Nc | 0.53 | 0.73 | 0.93 | 1.00 | 1.10 | 1.20 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dlnPR/dlnWc` | −0.09 | −0.28 | −0.87 | −1.69 | −4.81 | −18.1 |
+| `dlnFx/dlnW`, real map | −0.58 | −0.95 | −1.88 | **−3.29** | −8.38 | **−29.4** |
+| `dlnFx/dlnW`, PR frozen | −0.18 | −0.15 | −0.11 | −0.10 | −0.09 | −0.08 |
+
+The feedback is *restoring* (negative) — more flow, less thrust — but with the
+sampling station 12 cells upstream it acts after a delay, and delayed negative
+feedback of magnitude ≫ 1 oscillates. This is the dynamic form of the same
+conditioning defect D9 recorded for ICMF as a lookup coordinate: `Wc` spans
+133% of its range at 33% speed and 8% at 120%, so at the top of the map a
+0.1% flow error is a 1.8% pressure-ratio error, and the loop amplifies it.
+
+**Neither coordinate is usable at the top of these maps**, for opposite
+reasons, and the two failure regions coincide. Below ~90% speed on
+`SubsonicCompressor` both gains are below one and the inlet closure is the
+better of the two.
+
+**A control that is not a control.** Freezing `PR` and `Δh₀/θ` at their design
+values does *not* isolate the source magnitude, because it removes the map's own
+stabilising slope — the last row above shows the gain collapsing from −3.29 to
+−0.10. Its failures (blow-up at `n_smear` 1 and 5, a limit cycle at 21 and 41)
+are therefore evidence about a constant-`PR` compressor, which `PLAN.md` §Phase 3
+already records as having zero aerodynamic stiffness by construction. It is
+reported here because it was run and because it does bound the strength effect:
+at a quarter strength (`PR = 1.285`) the same configuration converges to
+`W` within 1.9e-7.
+
+**Status.** Not yet resolved. The measurements above are the useful output of
+this pass; the remedy is not settled and no claim is made that a real map has
+been held steady. See §8.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -808,18 +880,44 @@ cp — a regression on the entire thermodynamic layer.
 
 ### Phase 5 — Real compressor maps
 
-- **Phase 5a — ICMF with β-lines.** The first maps supplied are inlet corrected
-  mass flow with β as a dimension: `PR(β, N)`, `Wc₁(β, N)`, `η(β, N)`. Lookup
-  means solving for β such that `Wc₁(β, N)` matches the measured value.
-  Ingestion, interpolation, and an explicit extrapolation policy.
-- **Phase 5b — ECMF as the choke-line remedy.** See §7 Q3. Adopted only if
-  clamp-and-warn at the choke line proves insufficient.
+The original split (5a ICMF + β, 5b ECMF held in reserve) is superseded. D9
+retired ICMF as a *cycle-code* lookup coordinate on conditioning grounds, D13
+settled the interpolation scheme, and §3.9 showed the solver's closure is a
+separate question from either.
+
+- **Phase 5a — ingestion, ECMF, densification.** ✅ complete. `q1d.maps`:
+  workbook loading, corrected work and ECMF derived at load, PCHIP refinement of
+  the (β, Nc) grid before the conversion (D13), clamp-not-extrapolate in speed.
+- **Phase 5b — feasibility-first duct design.** ✅ complete. `q1d.design`:
+  a map point plus an inlet Mach number fixes the area, both stagnation states
+  and the back pressure; infeasibility is reported with its reason before a
+  solver exists. `analytic.state_from_flux` and `design.steady_profile` build
+  the discrete steady profile of a smeared disk by integrating the flux balance
+  (§3.9a).
+- **Phase 5c — a closure the solver can march.** *In progress, and the thing
+  that blocks the phase.* Both candidate coordinates fail at the top of these
+  maps for opposite reasons — exit corrected flow is circular with loop gain
+  above one, inlet corrected flow is non-circular but has `|dlnFx/dlnW|` up to
+  29 against a 12-cell sampling delay (§3.9b, §3.9c). Below ~90% speed on
+  `SubsonicCompressor` both gains are under one.
+- **Phase 5d — the deliverable.** Hold a real map steady at several speeds, show
+  the ECMF map with the converged solver points on it, then a throttle sweep
+  along one speed line into the surge and choke ends.
 - This is where `∂PR/∂Φ₁ < 0` finally supplies aerodynamic stiffness and surge
   dynamics become structurally representable — impossible with a constant-PR
-  map, which has zero stiffness by construction.
+  map, which has zero stiffness by construction. §3.9 is the first evidence
+  that the stiffness is *real*: it is what raises the loop gain from 0.10 to
+  3.29 at design speed.
 
 **Gate:** speedline reproduction, throttle sweep, and stable operation across
 the map.
+
+**A consistency debt this phase creates.** `maps.load_beta_map` derives
+corrected work with a *perfect-gas* `cp·T_ref·(PR^k − 1)/η`, while every
+invariance figure quoted in §3.6–§3.8 was measured with Cantera. Both are
+self-consistent today, because the solver is perfect-gas too. They stop being
+so the moment Phase 4 lands, so the 0.13%/0.29% invariance must not be claimed
+for the real-gas solver until the map calibration uses the same gas model.
 
 ### Beyond
 

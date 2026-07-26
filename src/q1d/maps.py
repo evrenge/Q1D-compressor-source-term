@@ -223,6 +223,61 @@ class BetaMap:
             efficiency=float(np.interp(beta, self.beta, eff)),
         )
 
+    def evaluate_at_Wc(self, Wc: float, corrected_speed: float) -> MapPoint:
+        """Look up by **inlet** corrected flow — the coordinate a solver can close on.
+
+        ECMF is the better coordinate for a cycle code, where the exit state is
+        known independently. Inside the Q1D solver it is not: the exit state is
+        produced by this very source, so keying on it closes an algebraic loop
+        through the source's own output. That loop's gain is
+        ``-dlnPR/dlnECMF``, measured at 0.90 at design speed on
+        ``SubsonicCompressor`` and **1.02–1.10** on ``TranssonicCompressor`` —
+        above one, where no amount of under-relaxation converges, because
+        under-relaxing a positive-gain loop gives ``|1 + r(g-1)| > 1`` for every
+        ``r > 0``.
+
+        Inlet ``Wc`` is measured upstream of the disk, where the field is clean
+        to ~1e-8, and depends on the source only through the solver's own
+        dynamics — which is the physical feedback, and is restoring: more flow →
+        lower PR → lower exit static pressure against a fixed back pressure →
+        the flow decelerates.
+
+        The price is conditioning. ``Wc`` spans 133% of its range at 33% speed
+        but only 8% at 120%, so ``dlnPR/dlnWc`` runs from −0.002 to −8.7: the
+        closure amplifies a mass-flow error into a pressure-ratio error by up to
+        ~9×. That is the compressor's real stiffness, not a modelling artefact.
+
+        Raises if ``Wc`` is not monotonic on the requested speed line — on
+        ``TranssonicCompressor`` above 88% speed it is not, the line being
+        vertical to within the tabulation, and no inlet-only closure can pick a
+        point there. That region needs the exit state and is handled separately.
+        """
+        e, wc, pr, cw, eff = self._speed_line(corrected_speed)
+        d = np.diff(wc)
+        if not (np.all(d > 0.0) or np.all(d < 0.0)):
+            span = wc.max() / wc.min() - 1.0
+            raise ValueError(
+                f"{self.name}: inlet Wc is not monotonic in beta at Nc={corrected_speed:.4g} "
+                f"(span {100 * span:.2f}%), so it cannot be inverted. The speed line is "
+                f"vertical to within the tabulation — the compressor is choked there and the "
+                f"operating point is set by the downstream system, not by the inlet flow"
+            )
+        beta = self._invert(wc, Wc)
+        return MapPoint(
+            beta=beta,
+            corrected_speed=corrected_speed,
+            Wc=float(np.interp(beta, self.beta, wc)),
+            PR=float(np.interp(beta, self.beta, pr)),
+            corrected_work=float(np.interp(beta, self.beta, cw)),
+            ecmf=float(np.interp(beta, self.beta, e)),
+            efficiency=float(np.interp(beta, self.beta, eff)),
+        )
+
+    def inlet_closure_is_invertible(self, corrected_speed: float) -> bool:
+        """Can :meth:`evaluate_at_Wc` be used at this speed?"""
+        d = np.diff(self._speed_line(corrected_speed)[1])
+        return bool(np.all(d > 0.0) or np.all(d < 0.0))
+
     def evaluate_at_beta(self, beta: float, corrected_speed: float) -> MapPoint:
         e, wc, pr, cw, eff = self._speed_line(corrected_speed)
         b = float(np.clip(beta, self.beta[0], self.beta[-1]))
