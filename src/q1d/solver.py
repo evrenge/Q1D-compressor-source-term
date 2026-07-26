@@ -167,6 +167,7 @@ class Solver:
         self.cv = np.zeros((3, n + 2))
         self.p = np.zeros(n + 2)
         self.t = 0.0
+        self.dt_last = 0.0
 
         # preallocated work arrays -- at ~100 cells, numpy per-call overhead
         # dominates the arithmetic, so avoiding fresh allocations matters
@@ -354,6 +355,16 @@ class Solver:
         return dt_local if self.config.local_time_stepping else float(dt_local.min())
 
     def advance(self, dt: np.ndarray | float) -> None:
+        """One time step.
+
+        ``advance`` owns the clock. It used to be ``run`` that advanced ``t``,
+        which meant a caller stepping the solver directly — every stability
+        study in this project does — kept ``t = 0`` forever, and the
+        ``NonPhysicalState`` message reported ``t=0`` for a failure thousands of
+        steps in. Sources that carry their own state need the step size, so
+        ``dt_last`` is recorded here too; with local time stepping it is the
+        smallest cell's step, which is the only one that bounds a global state.
+        """
         cvold = self._cvold
         np.copyto(cvold, self.cv)
         scale = np.asarray(dt) / self.grid.dx
@@ -362,6 +373,8 @@ class Solver:
             self.cv[:, 1:-1] = cvold[:, 1:-1] - (scale * alpha) * rhs
             self._update_pressure()
             self._sync_boundaries()
+        self.dt_last = float(np.min(dt))
+        self.t += self.dt_last
 
     def run(
         self,
@@ -417,7 +430,6 @@ class Solver:
                 dt = np.minimum(dt, remaining)  # clip so t_end is hit exactly
 
             self.advance(dt)
-            self.t += float(np.min(dt))
             step += 1
 
             if step % record_every == 0 or step == 1:  # residual_norm is ~27% of a step

@@ -40,6 +40,7 @@ __all__ = [
     "MappedCompressor",
     "MappedDiskState",
     "InletFlowCompressor",
+    "UnsteadyMappedCompressor",
 ]
 
 
@@ -520,4 +521,164 @@ class InletFlowCompressor:
         span = slice(self.cell, self.cell + self.n_smear)
         q[1, span] = ramp * Fx * self._weights
         q[2, span] = ramp * SWx * self._weights
+        return q
+
+
+@dataclass
+class UnsteadyMappedCompressor:
+    """Compressor whose position on the map is a **state**, not a function.
+
+    Every earlier disk in this module slides instantly along the speed line: a
+    mass-flow perturbation immediately produces the full steady ``dPR/dW``. That
+    is the one physically false step in the formulation, and it is what makes
+    the disk an acoustic amplifier. A real blade row cannot reorganise its
+    loading faster than the flow passes through it.
+
+    Here ``beta`` obeys
+
+    .. math::
+
+        \\tau \\frac{d\\beta}{dt} = \\beta_\\text{map}(W_c) - \\beta
+
+    and ``PR`` and ``Δh₀/θ`` are read at the *current* ``beta``. The momentum
+    flux term is **not** lagged — that is instantaneous gas dynamics, and an
+    earlier attempt that low-passed the whole applied source delayed it too,
+    which damped the wrong thing.
+
+    Why this matters, measured across 160 operating points on 14 maps
+    (``PLAN.md`` §3.10). ``Z = |dFx/dW|/c`` compares the disk's resistance with
+    the duct's characteristic impedance, and predicts the observed stability to
+    96%. Sliding along the map it reaches 19,608; at frozen ``beta`` the same
+    points give a median of 0.149 and a maximum of 0.391, against a measured
+    stability threshold of 0.82. Fast waves see the frozen-``beta`` disk; the
+    map slope enters only through the slow ``beta`` equation.
+
+    ``tau`` defaults to the blade row's own through-flow time, ``ℓ_row / u``,
+    which is reduced frequency one and needs no data the maps do not carry.
+    Pass ``tau`` explicitly for a rotor-period estimate (``1/N``) if the design
+    speed is known.
+
+    The steady answer does not depend on ``tau``: at convergence
+    ``beta = beta_map`` exactly, whatever ``tau`` was.
+    """
+
+    cell: int
+    beta_map: object  # BetaMap; annotated loosely to avoid a circular import
+    corrected_speed: float
+    sample_offset: int = 12
+    n_smear: int = 21
+    tau: float | None = None  # None -> blade-row through-flow time
+    last: MappedDiskState = field(default_factory=MappedDiskState)
+
+    _weights: np.ndarray = field(init=False, repr=False, default=None)
+    _beta: float = field(init=False, repr=False, default=math.nan)
+    _t_prev: float = field(init=False, repr=False, default=math.nan)
+    _tau: float = field(init=False, repr=False, default=math.nan)
+    _reversals: int = field(init=False, repr=False, default=0)
+
+    def __post_init__(self) -> None:
+        if self.n_smear < 1:
+            raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
+        if self.sample_offset < 1:
+            raise ValueError("sample_offset must be >= 1 so the disk cell itself is not read")
+        if self.tau is not None and self.tau <= 0.0:
+            raise ValueError(f"tau must be positive, got {self.tau!r}")
+        if not self.beta_map.inlet_closure_is_invertible(self.corrected_speed):
+            self.beta_map.evaluate_at_Wc(1.0, self.corrected_speed)
+        self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
+
+    @property
+    def reversals(self) -> int:
+        return self._reversals
+
+    @property
+    def beta(self) -> float:
+        """Current map position — the disk's internal state."""
+        return self._beta
+
+    @property
+    def response_time(self) -> float:
+        """``tau`` actually in use [s], including the derived default."""
+        return self._tau
+
+    def __call__(self, solver: Solver) -> np.ndarray:
+        from .analytic import static_from_stagnation
+        from .maps import P_REF, T_REF
+
+        gas = solver.gas
+        grid = solver.grid
+        n = grid.n_interior
+        last_cell = self.cell + self.n_smear - 1
+        if self.cell - self.sample_offset < 0 or last_cell >= n:
+            raise ValueError(
+                f"disk at cell {self.cell} spanning {self.n_smear} cells with sample_offset "
+                f"{self.sample_offset} does not fit in {n} interior cells"
+            )
+        area = float(grid.a_face[self.cell])
+        if not np.all(grid.a_face[self.cell : last_cell + 2] == area):
+            raise ValueError("area varies across the disk cells; see PLAN.md §4.5")
+
+        i = self.cell - self.sample_offset + 1
+        rho, u, p, c = solver.primitives()
+        rho_i, u_i, p_i = float(rho[i]), float(u[i]), float(p[i])
+        T = p_i / (rho_i * gas.R)
+        mach = u_i / float(c[i])
+        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
+        p01 = p_i * (T01 / T) ** gas.g_over_gm1
+        W = rho_i * u_i * float(grid.a_cell[i])
+
+        if W <= 0.0:
+            self._reversals += 1
+            self.last = MappedDiskState(W=W, T01=T01, p01=p01)
+            return np.zeros((3, n))
+
+        theta, delta = T01 / T_REF, p01 / P_REF
+        Wc = W * math.sqrt(theta) / delta
+        target = self.beta_map.evaluate_at_Wc(Wc, self.corrected_speed).beta
+
+        if math.isnan(self._beta):
+            # Start on the map, so a converged seed is not disturbed by the lag.
+            self._beta = target
+            self._t_prev = solver.t
+            row_length = float(grid.x_face[last_cell + 1] - grid.x_face[self.cell])
+            self._tau = self.tau if self.tau is not None else row_length / max(u_i, 1e-9)
+        elif solver.t > self._t_prev:
+            # Advance once per *step*, not once per Runge-Kutta stage.
+            dt = solver.t - self._t_prev
+            self._t_prev = solver.t
+            self._beta += (1.0 - math.exp(-dt / self._tau)) * (target - self._beta)
+
+        point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
+
+        dh0 = point.corrected_work * theta
+        T02 = T01 + dh0 / gas.cp
+        p02 = point.PR * p01
+
+        st1 = static_from_stagnation(T01, p01, W, area, gas)
+        st2 = static_from_stagnation(T02, p02, W, area, gas)
+        Fx = (st2.p - st1.p) * area + W * (st2.u - st1.u)
+        SWx = W * dh0
+
+        self.last = MappedDiskState(
+            phi1=W * math.sqrt(gas.R * T01) / (area * p01),
+            W=W,
+            T01=T01,
+            p01=p01,
+            PR=point.PR,
+            eta=point.efficiency,
+            Fx=Fx,
+            SWx=SWx,
+            beta=self._beta,
+            corrected_speed=self.corrected_speed,
+            ecmf=point.ecmf,
+            Wc=Wc,
+            corrected_work=point.corrected_work,
+            M2=st2.M,
+            T02=T02,
+        )
+
+        q = np.zeros((3, n))
+        span = slice(self.cell, self.cell + self.n_smear)
+        q[1, span] = Fx * self._weights
+        q[2, span] = SWx * self._weights
         return q
