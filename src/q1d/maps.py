@@ -18,6 +18,9 @@ coefficient normalised by ``N²``.
 Inverting inlet corrected flow to β is ill-posed over most of the map: the
 whole β range compresses into 3–10% of ``Wc`` above 72% speed, and is not
 monotonic. ``ECMF = Wc·√τ/PR`` is monotonic everywhere and spans 72–163%.
+
+**Densification happens in (β, Nc), before the ECMF conversion** — see
+:meth:`BetaMap.densify` and ``PLAN.md`` D13.
 """
 
 from __future__ import annotations
@@ -87,6 +90,90 @@ class BetaMap:
         """Per speed line, ``max/min - 1`` along β — the conditioning measure."""
         a = getattr(self, field)
         return a.max(axis=0) / a.min(axis=0) - 1.0
+
+    # -- refinement ---------------------------------------------------------
+
+    def densify(self, factor: int = 9) -> BetaMap:
+        """Monotone-cubic refinement of the ``(β, Nc)`` grid, ``factor``× each way.
+
+        Refining **before** the ECMF conversion is what makes this worth doing.
+        β is not a physical dimension, but it is the *correspondence* label:
+        β = 0.5 on the 80% line and β = 0.5 on the 90% line are the same
+        relative position along their lines, so crossing speeds at fixed β
+        follows the map's own grid. Crossing at fixed ECMF cuts across it, and
+        measures worse — 2.81%/6.60% against 2.84%/5.32% on the 22 supplied
+        maps (compressors/turbines, leave-one-speed-line-out).
+
+        With a dense table, the plain linear lookup in :meth:`_speed_line`
+        reproduces direct PCHIP to 0.07%, so this buys cubic accuracy at linear
+        cost on a regular grid:
+
+        =============================  ============  ==========
+        leave-one-interior-line-out      linear        this
+        =============================  ============  ==========
+        compressors                        2.84%        1.79%
+        turbines                           5.32%        2.71%
+        =============================  ============  ==========
+
+        Only ``Wc``, ``PR`` and ``corrected_work`` are interpolated; ``ecmf``
+        and ``efficiency`` are *re-derived* from the refined values, exactly as
+        at load. Efficiency is never interpolated — it has a pole on
+        ``TranssonicCompressor`` (``PLAN.md`` §3.6) and a cubic through a pole
+        is meaningless.
+
+        Refinement adds no information and does not help extrapolation: outside
+        the tabulated speed range cubic is *worse* than linear (7.7% against
+        4.9%), which is why :meth:`_speed_line` clamps rather than extrapolates.
+        """
+        from scipy.interpolate import PchipInterpolator
+
+        if factor < 1:
+            raise ValueError(f"densify factor must be >= 1, got {factor}")
+        if factor == 1:
+            return self
+
+        def refine(axis: np.ndarray) -> np.ndarray:
+            if len(axis) < 2:
+                return axis
+            return np.concatenate(
+                [np.linspace(axis[i], axis[i + 1], factor + 1)[:-1] for i in range(len(axis) - 1)]
+                + [axis[-1:]]
+            )
+
+        beta = refine(self.beta)
+        speed = refine(self.corrected_speed)
+
+        def stretch(a: np.ndarray) -> np.ndarray:
+            # β first (within each supplied speed line), then Nc at fixed β.
+            if len(self.beta) >= 3:
+                a = PchipInterpolator(self.beta, a, axis=0)(beta)
+            else:
+                a = np.stack([np.interp(beta, self.beta, a[:, j]) for j in range(a.shape[1])], 1)
+            if len(self.corrected_speed) >= 3:
+                return PchipInterpolator(self.corrected_speed, a, axis=1)(speed)
+            n = self.corrected_speed
+            return np.stack([np.interp(speed, n, a[i]) for i in range(len(beta))])
+
+        Wc = stretch(self.Wc)
+        PR = stretch(self.PR)
+        corrected_work = stretch(self.corrected_work)
+
+        dh0s = self.gas.cp * T_REF * (PR**self.gas.gm1_over_g - 1.0)
+        tau = 1.0 + corrected_work / (self.gas.cp * T_REF)
+        if np.any(tau <= 0.0):
+            raise ValueError(f"{self.name}: densification produced a non-physical τ")
+
+        return BetaMap(
+            name=f"{self.name}×{factor}",
+            beta=beta,
+            corrected_speed=speed,
+            Wc=Wc,
+            PR=PR,
+            efficiency=dh0s / corrected_work,
+            corrected_work=corrected_work,
+            ecmf=Wc * np.sqrt(tau) / PR,
+            gas=self.gas,
+        )
 
     # -- evaluation ---------------------------------------------------------
 

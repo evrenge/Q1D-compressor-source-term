@@ -335,6 +335,56 @@ Corrected work is still preferred, on the grounds this test does not measure:
 it is monotonic in β on all 21 speed lines of the two nominated maps where η
 manages 1 of 21, and it is finite where η has a pole (§3.6).
 
+### 3.8 The interpolation error budget — where the error actually is
+
+Every number below is scale-free: worst deviation in reconstructed `Δh₀`,
+divided by that map's own `max|Δh₀|`. 22 supplied maps, 15 compressor and 7
+turbine, real-gas (Cantera, dry air), compressors calibrated at 288.15 K and
+exercised over 230–330 K, turbines at 1300 K over 900–1800 K.
+
+**Correction to an earlier finding.** A previous sweep reported cross-speed
+interpolation at 10–16% and concluded it dominated every other term. That sweep
+held out the *end* speed lines as well, which asks the scheme to predict outside
+the map's speed range — it measured **extrapolation, not interpolation**.
+Restricted to interior lines the number is 2.8%/5.3%. The actionable half of the
+finding survives: speed must be clamped at the map's ends (D13).
+
+| error source | compressors | turbines |
+| --- | --- | --- |
+| ambient invariance of `L/θ` (§3.6) | 0.13% | 0.29% |
+| interpolation along ECMF, half resolution | ~1.2% | ~0.55% |
+| across speed lines, linear in Nc at fixed β | 2.84% | 5.32% |
+| across speed lines, **PCHIP** in Nc at fixed β (D13) | **1.79%** | **2.71%** |
+| across speed lines, inverting ECMF first then blending | 2.81% | 6.60% |
+| *extrapolation* past the end speed lines, linear | 4.89% | 10.73% |
+| *extrapolation* past the end speed lines, cubic | 7.74% | 8.39% |
+
+Leave-one-interior-speed-line-out puts the query two gaps from its neighbours,
+so these overstate a real query. Holding out at four gaps as well gives an
+observed convergence order of only 1.2–1.6 — not the asymptotic 2 and 3, so the
+tabulated maps carry near-kinks and the cubic gain is ~1.6–2×, not an order of
+magnitude. Extrapolated back to native spacing the cross-speed term is
+0.13–0.18% mean.
+
+**Normalising the loss by speed.** `L/(θ·N²)` with *physical* `N` and
+`L/(θ·N_c²)` with *corrected* `N_c` are not two candidates but one, plus an
+error. Since `N = N_c√θ`, `θ·N² = θ²·N_c²`, so `L/(θ·N_c²)` **is** `L/N²`, the
+physical loss coefficient — already ambient-invariant with no θ in it, because
+`L ∝ θ` and `U² ∝ N² ∝ θ`. Writing `L/(θ·N²)` divides by θ a second time and
+makes the reconstruction scale as `θ²`:
+
+| stored | compressors 230–330 K | turbines 900–1800 K |
+| --- | --- | --- |
+| `L/θ` | 0.13% | 0.29% |
+| `L/N²` ( ≡ `L/(θ·N_c²)` ) | 0.13% | 0.29% |
+| `L/(θ·N²)` | **8.12%** | **33.06%** |
+
+Across speed lines the `N_c` normalisation is a wash — `L/N_c^k` for
+`k ∈ {−2,−1,0,1,2}` gives 2.02/1.84/**1.79**/1.88/2.43% on compressors and
+3.18/2.90/2.71/**2.61**/2.73% on turbines, all within ±0.2% of `k = 0`. The `N²`
+denominator is worth having for *definedness* — unlike η it never has a zero
+denominator — but it buys nothing for interpolation. `k = 0` stands.
+
 ### 3.4 Measured cost of the alternatives
 
 Over 33,750 source evaluations (a full 0.5 s run at the prototype's settings):
@@ -794,10 +844,11 @@ implicit time integration.
 | D12 | Maps store **corrected work** `Δh₀/T₀₁` (equivalently the work coefficient `Δh₀/N²`), not η, not τ, not loss | η is singular where PR → 1 with work input; τ is invariant only for a perfect gas and drifts 16.8% at 1200 K. Loss and corrected work are *equally* invariant — at fixed η they are proportional, `loss = Δh₀(1−η)` — so directness decides: `SWx = W·Δh₀` needs corrected work immediately, whereas loss requires solving the isentropic entropy inversion on every evaluation just to subtract it back out (§3.6). Author's proposal, second alternative | 2026-07-25 |
 | D11 | R = 287.058 J/kg/K (Cantera, dry air) for all new work; `AIR_LEGACY` keeps 287.1429 | Author's decision. The legacy value is derived from cp=1005, γ=1.4 and is 0.03% off. `AIR_LEGACY` is retained solely so the Phase 1–3 regression numbers stay reproducible; the two must never be mixed in one calculation | 2026-07-25 |
 | D10 | Steady-state acceptance only, extended with a hold test | No transient reference data exists yet. A solver that reaches the analytically known point and holds it is accepted for now; revisited when transient data becomes available | 2026-07-25 |
+| D13 | Maps are **PCHIP-densified 9× in (β, Nc) at load, before the ECMF conversion**; the runtime lookup stays linear. Speed is **clamped, never extrapolated** | Author's proposal, measured in §3.7. β is not a physical dimension but it is the correspondence label across speed lines, so refining in (β, Nc) and converting afterwards beats refining in ECMF. Dense-plus-linear reproduces direct PCHIP to 0.07% at linear cost on a regular grid, which also ports to C++ as a flat array. Cubic *extrapolation* beyond the tabulated speeds is worse than linear (7.7% vs 4.9%), hence the clamp | 2026-07-25 |
 
-Dependencies: `numpy`, `matplotlib`, `pytest`. `scipy` optional — root-finding
-will be hand-written and guarded to avoid the dependency unless it earns its
-place.
+Dependencies: `numpy`, `scipy`, `pandas`, `openpyxl`, `pytest`; `matplotlib`
+optional. `scipy` earned its place with D13 (`PchipInterpolator`); root-finding
+inside the solver stays hand-written (`rtsafe`) and does not use it.
 
 ---
 

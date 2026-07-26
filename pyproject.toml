@@ -7,7 +7,7 @@ name = "q1d"
 version = "0.0.1"
 description = "Quasi-1D Euler solver with turbomachinery source terms"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "scipy>=1.10", "pandas>=2.0", "openpyxl>=3.1"]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.7"]
