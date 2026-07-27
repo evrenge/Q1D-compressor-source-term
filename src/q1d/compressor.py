@@ -1473,6 +1473,30 @@ class EcmfCompressor:
     five digits; 4 and 8 do not converge, with clamping appearing at 8. The
     transport delay from disk to station enters the t−1 path, and beyond ~3 cells
     it destabilises the loop. Default 1, which reads the disk's own exit face.
+
+    **Use ``inlet_lag = key_lag = 1e-2``. Smaller is not faster and is not
+    safe.** Both filters have unit DC gain, so ``tau`` cannot move the answer —
+    measured over a hundredfold range on ``SubsonicCompressor`` Nc 1.0, the
+    converged mass flow moves by 2e−10 relative (+4.0038e−07 at 1e−2 against
+    +3.9953e−07 at 1e−4). What it does change is speed and robustness, and
+    neither favours a smaller value:
+
+    ==========  ==================  =============================
+    ``tau``     control, steps      ``HighPqPCompr`` Nc 0.950
+    ==========  ==================  =============================
+    1e−2        9 000               **HELD** (PR 15.883)
+    3e−3        9 000               died at 1164
+    1e−3        8 000               died at 1122
+    3e−4        6 500               HELD, 35 500 steps
+    1e−4        14 000              died at 533
+    ==========  ==================  =============================
+
+    The speedup on offer is 1.4×, not the order of magnitude the 500-steps-per-
+    time-constant arithmetic suggests: below ~1e−2 convergence is no longer
+    filter-limited but set by the duct's own acoustic and convective settling,
+    and at 1e−4 it gets slower again. Meanwhile high pressure ratio becomes
+    erratic — dying at 3e−3 and 1e−3, surviving at 3e−4, dying at 1e−4. That is
+    marginal stability, not a threshold, and not a region to operate in.
     """
 
     cell: int

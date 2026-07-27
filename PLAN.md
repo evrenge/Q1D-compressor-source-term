@@ -1189,6 +1189,56 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.33 The filters cannot be made cheaper, and the sweep with both fixes
+
+**Both fixes together, all four maps, same grid as §3.27** — every tabulated
+speed line, seven positions including both β ends, `densify` 36, single disk,
+201 cells:
+
+| map | cells held | on lines the inverse refuses |
+| --- | --- | --- |
+| `SubsonicCompressor` | **84/84** | — |
+| `TranssonicCompressor` | **63/63** | **35/35** |
+| `HighPqPCompr` | 46/70 *(was 21/70)* | 15/35 *(was 0/35)* |
+| `TwoStgRadialCompr` | 68/98 | 14/21 |
+| **total** | **261/315** | **64/91** |
+
+The two complete maps reproduced their pre-`key_lag` scores *exactly*, which is
+what makes the `HighPqPCompr` gain attributable to the fix rather than to run
+variation. **PR 26.999 held**, against a previous ceiling of 14.972 (§3.27).
+
+**The filter time constant cannot be reduced.** `dt ≈ 2e−5 s` against
+`tau = 1e−2 s` is 500 steps per time constant, which looks like the obvious place
+to buy speed. It is not.
+
+| `tau` | control steps | control W | `HighPqPCompr` Nc 0.950, PR 15.883 |
+| --- | --- | --- | --- |
+| **1e−2** | 9 000 | +4.0038e−07 | **HELD**, 14 500 steps |
+| 3e−3 | 9 000 | +3.9954e−07 | died at 1164 |
+| 1e−3 | 8 000 | +3.9953e−07 | died at 1122 |
+| 3e−4 | 6 500 | +3.9953e−07 | HELD, 35 500 steps |
+| 1e−4 | 14 000 | +3.9953e−07 | died at 533 |
+
+Two results, one good and one negative.
+
+**Unit DC gain is now proven to 2e−10 over a hundredfold range.** The converged
+answer is invariant to `tau`, so neither filter can be accused of setting the
+operating point. That is the property §3.12 claimed and this measures properly.
+
+**But there is no speed on offer.** 1.4× at best, and slower again at 1e−4 —
+below ~1e−2 convergence is no longer filter-limited but set by the duct's own
+acoustic and convective settling. The earlier expectation of ~10× was wrong, and
+the arithmetic that produced it counted only the filter.
+
+**And high pressure ratio becomes erratic**: dies at 3e−3 and 1e−3, survives at
+3e−4, dies at 1e−4. Non-monotone in `tau` is marginal stability rather than a
+threshold — and that is itself a datum for §3.32's open problem, since it says
+those cells sit on ground where small changes flip them.
+
+Keep `inlet_lag = key_lag = 1e-2`. Real speed has to come from the per-step cost
+(~200 µs of Python at 201 cells, which the C++ port addresses) or from local time
+stepping for steady runs, not from the filters.
+
 ### 3.32 The high-PR ceiling was an unfiltered key, not the keying
 
 §3.31 concludes that ECMF keying loses high pressure ratio, and calls it a
