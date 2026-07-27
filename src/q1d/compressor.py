@@ -1067,6 +1067,17 @@ class UnsteadyMappedCompressor:
         return q
 
 
+#: Smallest β change the secant estimate will divide by. Below this the
+#: difference quotient is noise, and the map slope is used instead.
+SECANT_MIN_DBETA = 1e-9
+
+#: How far the measured ``dR/dβ`` may depart from the map's estimate before it is
+#: rejected as spurious. Generous on purpose: the whole point is that the map
+#: slope is wrong by a factor near choke — measured 0.091 against 0.60 on
+#: ``HighPqPCompr`` Nc 0.700 near the choke end, a ratio of 6.6.
+SECANT_MAX_RATIO = 50.0
+
+
 @dataclass
 class FlowMatchedCompressor:
     """Compressor whose map position is driven by the flow **residual**.
@@ -1154,6 +1165,7 @@ class FlowMatchedCompressor:
     gain: float = 1.0
     tau: float | None = None  # None -> blade-row through-flow time
     beta0: float | None = None  # None -> start at mid-line
+    secant: bool = False  # default flips once the sweep justifies it
     last: MappedDiskState = field(default_factory=MappedDiskState)
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
@@ -1164,6 +1176,9 @@ class FlowMatchedCompressor:
     _tau: float = field(init=False, repr=False, default=math.nan)
     _reversals: int = field(init=False, repr=False, default=0)
     _clamps: int = field(init=False, repr=False, default=0)
+    _r_prev: float = field(init=False, repr=False, default=math.nan)
+    _b_prev: float = field(init=False, repr=False, default=math.nan)
+    _secant_uses: int = field(init=False, repr=False, default=0)
 
     def __post_init__(self) -> None:
         if self.n_smear < 1:
@@ -1217,6 +1232,15 @@ class FlowMatchedCompressor:
         """``tau`` actually in use [s], including the derived default."""
         return self._tau
 
+    @property
+    def secant_uses(self) -> int:
+        """Steps whose ``dR/dβ`` came from the run rather than from the map.
+
+        Zero on a run that never moves — a converged seed — and that is correct:
+        with nothing to measure, the map slope is the only estimate there is.
+        """
+        return self._secant_uses
+
     def __call__(self, solver: Solver) -> np.ndarray:
         from .analytic import static_from_stagnation
         from .maps import P_REF, T_REF
@@ -1262,9 +1286,21 @@ class FlowMatchedCompressor:
             dt = solver.t - self._t_prev
             self._t_prev = solver.t
             wc_b = float(np.interp(self._beta, self._beta_grid, self._wc_line))
-            slope = float(np.interp(self._beta, self._beta_grid, self._dlnecmf))
-            step = self.gain * (Wc / wc_b - 1.0) / slope
-            nb = self._beta + (1.0 - math.exp(-dt / self._tau)) * step
+            residual = Wc / wc_b - 1.0
+            # The map slope is the fallback estimate of dR/dbeta; it assumes the
+            # duct constant c = 1. Where the run has moved far enough to say
+            # otherwise, believe the run (see `secant`).
+            deriv = -float(np.interp(self._beta, self._beta_grid, self._dlnecmf))
+            if self.secant and not math.isnan(self._r_prev):
+                db = self._beta - self._b_prev
+                if abs(db) > SECANT_MIN_DBETA:
+                    measured = (residual - self._r_prev) / db
+                    lo, hi = deriv / SECANT_MAX_RATIO, deriv * SECANT_MAX_RATIO
+                    if lo <= measured <= hi:
+                        deriv = measured
+                        self._secant_uses += 1
+            self._r_prev, self._b_prev = residual, self._beta
+            nb = self._beta - (1.0 - math.exp(-dt / self._tau)) * self.gain * residual / deriv
             if nb < 0.0 or nb > 1.0:
                 self._clamps += 1
             self._beta = min(1.0, max(0.0, nb))
