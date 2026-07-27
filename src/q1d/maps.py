@@ -26,7 +26,7 @@ monotonic. ``ECMF = Wc·√τ/PR`` is monotonic everywhere and spans 72–163%.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -443,6 +443,9 @@ class ECMFMap:
     corrected_work: np.ndarray
     efficiency: np.ndarray
     gas: PerfectGas
+    #: Count of lookups whose key fell outside the tabulated range, in a
+    #: one-element array so a frozen dataclass can still keep the tally.
+    off_table: np.ndarray = field(default_factory=lambda: np.zeros(1, dtype=np.int64))
 
     @classmethod
     def from_beta_map(cls, m: BetaMap, n_key: int | None = None) -> ECMFMap:
@@ -522,6 +525,15 @@ class ECMFMap:
             # a meaningful operating point, and 3.8 measured extrapolation as the
             # worst error source on these maps.
             return float(np.interp(ecmf, self.ecmf[:, col], a[:, col]))
+
+        # Record that the demand left the table. Clamping is the right thing to
+        # DO -- the map has no information out there and extrapolating it is
+        # measurably the worst option -- but doing it silently is not. An
+        # operating point pinned at the end has lost its restoring force in one
+        # direction, and a run that converges anyway has converged to the edge of
+        # the data rather than to an answer (`PLAN.md` §3.34).
+        if ecmf < self.ecmf[0, j] or ecmf > self.ecmf[-1, j]:
+            self.off_table[0] += 1
 
         pr = at(j, self.PR) * (1.0 - w) + at(j + 1, self.PR) * w
         cw = at(j, self.corrected_work) * (1.0 - w) + at(j + 1, self.corrected_work) * w

@@ -208,3 +208,45 @@ def test_a_turbine_is_refused_with_a_useful_message():
 def test_n_key_must_be_usable():
     with pytest.raises(ValueError, match="n_key"):
         ECMFMap.from_beta_map(beta_map(MAPS[0], factor=1), n_key=1)
+
+
+class TestOffTableIsCounted:
+    """Clamping at the table end is right; doing it silently is not.
+
+    The map holds no information beyond its own ends, and §3.8 measures
+    extrapolation as the worst error source on these maps — so clamping is the
+    correct action. But a clamped lookup leaves the operating point pinned with
+    no restoring force outward, and the run then converges to the edge of the
+    data rather than to an answer.
+
+    Measured on ``HighPqPCompr`` Nc 0.950 (``PLAN.md`` §3.34): a design point
+    placed *exactly* on the end of the ECMF range gives −7.54e−02 and never
+    converges; **one percent** inside, the same line holds at +4.14e−08. A step,
+    not a slope — and completely invisible without a counter.
+    """
+
+    def test_a_lookup_inside_the_table_is_not_counted(self):
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        col = len(e.corrected_speed) // 2
+        lo, hi = float(e.ecmf[0, col]), float(e.ecmf[-1, col])
+        e.evaluate(0.5 * (lo + hi), float(e.corrected_speed[col]))
+        assert int(e.off_table[0]) == 0
+
+    @pytest.mark.parametrize("side", ["below", "above"])
+    def test_a_lookup_outside_the_table_is_counted(self, side):
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        col = len(e.corrected_speed) // 2
+        lo, hi = float(e.ecmf[0, col]), float(e.ecmf[-1, col])
+        nc = float(e.corrected_speed[col])
+        e.evaluate(lo - 0.05 * (hi - lo) if side == "below" else hi + 0.05 * (hi - lo), nc)
+        assert int(e.off_table[0]) == 1
+
+    def test_the_clamped_value_is_still_the_end_value(self):
+        """Counting must not change what the lookup returns."""
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        col = len(e.corrected_speed) // 2
+        lo, hi = float(e.ecmf[0, col]), float(e.ecmf[-1, col])
+        nc = float(e.corrected_speed[col])
+        assert e.evaluate(lo - 10.0 * (hi - lo), nc).PR == pytest.approx(
+            e.evaluate(lo, nc).PR, rel=1e-9
+        )

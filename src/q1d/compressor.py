@@ -1518,6 +1518,7 @@ class EcmfCompressor:
     _t_prev: float = field(init=False, repr=False, default=math.nan)
     _reversals: int = field(init=False, repr=False, default=0)
     _stalls: int = field(init=False, repr=False, default=0)
+    _off_table: int = field(init=False, repr=False, default=0)
 
     def __post_init__(self) -> None:
         if self.n_smear < 1:
@@ -1551,6 +1552,33 @@ class EcmfCompressor:
     def point(self):
         """The map point currently applied — frozen within a step."""
         return self._point
+
+    @property
+    def off_table(self) -> int:
+        """Steps whose demanded ECMF fell outside the tabulated speed line.
+
+        **A converged run with a non-zero count has converged to the edge of the
+        data, not to an answer.** The map holds no information beyond its own
+        ends, so the lookup clamps — which is the right thing to do, since §3.8
+        measures extrapolation as the worst error source on these maps, but it
+        leaves the operating point pinned with no restoring force outward.
+
+        Measured on ``HighPqPCompr`` Nc 0.950 (``PLAN.md`` §3.34): a design point
+        placed *exactly* on the end of the ECMF range gives −7.54e−02 and never
+        converges, while the same line **one percent** inside holds at +4.14e−08.
+        The transition is a step, not a slope, and it is invisible without this
+        counter.
+        """
+        return self._off_table
+
+    def _map_off_table(self) -> int:
+        """The map's own off-table tally, or 0 for a map that does not keep one.
+
+        Read either side of the lookup so each disk attributes only its own
+        excursions — an engine shares one map object between many components.
+        """
+        counter = getattr(self.ecmf_map, "off_table", None)
+        return 0 if counter is None else int(counter[0])
 
     def _exit_ecmf(self, solver, gas, T01, p01, theta, delta) -> float:
         idx = self.cell + self.n_smear - 1 + self.exit_offset
@@ -1634,7 +1662,9 @@ class EcmfCompressor:
                     self._key += (1.0 - math.exp(-(solver.t - t_prev) / tau)) * (
                         e - self._key
                     )
+                before = self._map_off_table()
                 self._point = self.ecmf_map.evaluate(self._key, self.corrected_speed)
+                self._off_table += self._map_off_table() - before
 
         point = self._point
         dh0 = point.corrected_work * theta
