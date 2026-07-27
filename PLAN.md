@@ -1189,6 +1189,74 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.26 Inlet-Wc keying is not ill-conditioned near choke, it is rank-deficient
+
+The full-map sweep answers a question that had been carried on assertion. Keying
+the closure on **inlet** corrected flow refuses **29% of the tabulated speed
+lines** across the four maps, and always the top ones:
+
+| map | lines | invertible | refused | refused speeds |
+| --- | --- | --- | --- | --- |
+| `SubsonicCompressor` | 12 | 12 | 0 | — |
+| `TranssonicCompressor` | 9 | 4 | **5** | 0.880 … 1.144 |
+| `HighPqPCompr` | 10 | 5 | **5** | 0.900 … 1.025 |
+| `TwoStgRadialCompr` | 14 | 11 | **3** | 1.030 … 1.100 |
+| **total** | 45 | 32 | **13 (29%)** | |
+
+`SubsonicCompressor` refuses nothing, which is why sweeping it alone gave a
+flattering 58/60 and why the problem stayed hidden.
+
+**The refusal is the closure, not the design.** `design_from_map` returns
+perfectly good operating points on every refused line — PR 1.820, 1.991, 2.112,
+2.159, 2.318 on `TranssonicCompressor`. What raises is
+`inlet_closure_is_invertible`.
+
+**And it is rank deficiency, not conditioning.** On a choked speed line the whole
+β range compresses into about **1% of inlet `Wc`** while `PR` spans nearly 50%:
+
+| map | Nc | `Wc` spread | ECMF spread | `PR` spread |
+| --- | --- | --- | --- | --- |
+| `TranssonicCompressor` | 1.144 | **9.97e−03** | 4.88e−01 | 4.94e−01 |
+| `HighPqPCompr` | 1.025 | **7.61e−03** | 3.31e−01 | 3.65e−01 |
+| `TwoStgRadialCompr` | 1.100 | 4.47e−02 | 4.69e−01 | 4.39e−01 |
+
+The speed line is *vertical in `Wc`* — that is what choked means. Inverting
+`Wc → β` there is not merely delicate; there is no inverse, and a truncation
+error of order 1% destroys it entirely.
+
+**"Key on ECMF instead" does not work if the ECMF is built from the inlet.**
+Since `ECMF_map(β) ≡ Wc_map(β)·√τ(β)/PR(β)`, forming ECMF from a measured inlet
+`Wc` gives
+
+```
+g(β) = Wc_meas·√τ(β)/PR(β) − ECMF_map(β) = [Wc_meas − Wc_map(β)]·√τ(β)/PR(β)
+```
+
+— the *same* root, merely rescaled. ECMF only helps when it is formed from the
+**exit** state, which is the circular closure §3.9 rejected.
+
+**The physical statement.** On a choked line the inlet state carries no
+information about position along it; the back pressure sets the operating point.
+So no instantaneous inlet-only closure can work there, for any numerical method.
+The operating point must be either downstream-informed or a dynamical state.
+
+**`UnsteadyMappedCompressor` does not fix this.** Its state equation is
+`τ dβ/dt = β_map(Wc) − β`, which still needs the same inversion; it addresses
+acoustic amplification (§3.10), not invertibility.
+
+**Two candidate closures, neither built.**
+
+1. *Exit ECMF solved simultaneously.* §3.9 rejected it because the algebraic loop
+   has measured gain `−dlnPR/dlnECMF` of 0.90 to 1.10, and above one a
+   fixed-point iteration diverges for every relaxation factor. That is an
+   argument against fixed-point iteration, not against the closure — and
+   `ImplicitStepper` (§3.17) now exists to solve the state and the closure
+   together.
+2. *β driven by a downstream error.* `τ dβ/dt = K·(p₀₂ measured − p₀₂ predicted
+   at β)` — the operating point slides until what the machine delivers matches
+   what the duct demands, which is what component matching *is*, and what a real
+   compressor on a throttle actually does. Nothing is inverted.
+
 ### 3.25 Re-measuring the open failures — most of them were already fixed
 
 §3.19 left two failures open on `HPC01`: a near-choke limit cycle, and startup
