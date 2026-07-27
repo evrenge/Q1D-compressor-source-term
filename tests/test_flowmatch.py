@@ -7,8 +7,10 @@ compressor maps (``PLAN.md`` §3.26). The cause is rank deficiency: at Nc 1.144 
 4.94e−01 in ``PR``.
 
 :class:`FlowMatchedCompressor` never forms that inverse. β is a state relaxed on
-the flow *residual*, scaled by the pressure slope rather than the flow slope.
-Three properties have to hold together, and they are what this file pins:
+the flow *residual*, scaled by the map's own ECMF slope — the only one of the
+three candidate slopes that neither vanishes nor reverses anywhere on the
+supplied maps. Three properties have to hold together, and they are what this
+file pins:
 
 * **it solves the same equation** — at steady state ``Wc_meas = Wc_map(β)``, so a
   line the inverse can do must give the identical answer. If it did not, this
@@ -145,25 +147,41 @@ class TestBetaState:
         s.source(s)
         assert disk.beta != first
 
-    @pytest.mark.parametrize("speed", [0.88, 1.144])
-    def test_the_step_is_scaled_by_the_pressure_slope_not_the_flow_slope(self, speed):
+    @pytest.mark.parametrize("path", sorted(DATA.glob("*.xlsx")))
+    def test_only_the_ecmf_slope_is_safe_to_divide_by(self, path):
         """Guards the one decision that makes a vertical speed line workable.
 
-        The failure is not that ``∂lnWc/∂β`` is small, it is that it **changes
-        sign and passes through zero** — a Newton step on ``Wc`` is singular
-        somewhere on every refused line, which is the same fact that stops
-        ``evaluate_at_Wc`` inverting it. ``∂lnPR/∂β`` keeps one sign and stays
-        bounded away from zero (0.14 at Nc 0.88, 0.36 at Nc 1.144), which is
-        what makes it a usable scale where the flow slope is not.
+        The step is a damped Newton step, so the denominator is a slope, and the
+        choice of *which* slope is the whole design. Measured here on every
+        tabulated line of every supplied map:
+
+        * ``∂lnWc/∂β`` reverses sign — that is what stops ``evaluate_at_Wc``
+          inverting the refused lines, and Newton on it is singular, not merely
+          stiff;
+        * ``∂lnPR/∂β`` reverses too, at the **surge peak**, on 20 of the 45
+          lines. It drives β the wrong way past the peak and killed
+          ``TwoStgRadialCompr`` Nc 0.600 near surge, a point the inverse holds;
+        * ``∂lnECMF/∂β`` never reverses and never falls below 0.225 — the
+          documented property ECMF was introduced for.
         """
-        m = load_beta_map(REFUSED[0], GAS).densify(9)
-        _, wc, pr, _, _ = m._speed_line(speed)
-        d_wc = np.gradient(np.log(wc), m.beta)
-        d_pr = np.gradient(np.log(pr), m.beta)
-        assert (d_wc[:-1] * d_wc[1:] < 0.0).any(), "premise gone: Wc slope no longer reverses"
-        assert not (d_pr[:-1] * d_pr[1:] < 0.0).any(), "PR slope reverses; the scale is unsafe"
-        assert np.abs(d_pr).min() > 0.1, (
-            f"|dlnPR/dbeta| falls to {np.abs(d_pr).min():.3g}; the step would blow up"
+        raw = load_beta_map(path, GAS)
+        m = raw.densify(9)
+        floor, reversals = np.inf, {"Wc": 0, "PR": 0}
+        speeds = sorted({float(x) for x in raw.corrected_speed.ravel()})
+        for nc in speeds:
+            e, wc, pr, _, _ = m._speed_line(nc)
+            d_e = np.gradient(np.log(e), m.beta)
+            assert not (d_e[:-1] * d_e[1:] < 0.0).any(), (
+                f"{path.stem} Nc {nc}: ECMF slope reverses; the scale is unsafe"
+            )
+            floor = min(floor, float(np.abs(d_e).min()))
+            for key, a in (("Wc", wc), ("PR", pr)):
+                d = np.gradient(np.log(a), m.beta)
+                reversals[key] += bool((d[:-1] * d[1:] < 0.0).any())
+        assert floor > 0.2, f"{path.stem}: |dlnECMF/dbeta| falls to {floor:.3g}"
+        assert reversals["Wc"] or reversals["PR"], (
+            f"{path.stem}: premise gone — neither Wc nor PR reverses on any line, "
+            f"so this map no longer demonstrates why ECMF is needed"
         )
 
 

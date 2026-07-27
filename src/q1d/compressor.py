@@ -1090,19 +1090,30 @@ class FlowMatchedCompressor:
     .. math::
 
         \\tau \\frac{d\\beta}{dt}
-            = -K\\,\\frac{W_c^\\text{meas}/W_c^\\text{map}(\\beta) - 1}
-                        {\\partial \\ln PR/\\partial \\beta}
+            = K\\,\\frac{W_c^\\text{meas}/W_c^\\text{map}(\\beta) - 1}
+                       {\\partial \\ln ECMF/\\partial \\beta}
 
     Four things make this work where the inverse does not.
 
-    **The scale factor is the pressure slope, not the flow slope.** Dividing by
-    ``∂lnWc/∂β`` would be Newton's method on the map, and on a refused line that
-    derivative *changes sign* — it passes through zero, which is the same fact
-    that stops :meth:`BetaMap.evaluate_at_Wc` inverting it, so the Newton step is
-    singular rather than merely large. ``∂lnPR/∂β`` keeps one sign and stays
-    bounded away from zero on every line of every supplied map (0.14 at Nc 0.88
-    on ``TranssonicCompressor``, 0.36 at Nc 1.144) — that is what "the compressor
-    makes pressure" means — so it is a usable scale where the flow slope is not.
+    **The scale factor is the ECMF slope, and only ECMF will do.** The step is a
+    damped Newton step on the residual, so the denominator wants to be
+    ``∂R/∂β ≈ c\\,∂lnPR/∂β - ∂lnWc/∂β`` — the duct's flow response to pressure,
+    less the map's own flow slope. Taking the duct constant ``c`` as one makes
+    that ``-∂lnECMF/∂β``, and ECMF is monotonic in β on every speed line of
+    every supplied map. That is not a convenience, it is the documented reason
+    ECMF exists (:mod:`q1d.maps`), and it is the only one of the three
+    candidates that survives: measured over all 45 tabulated lines of the four
+    compressor maps, ``|∂lnECMF/∂β|`` never falls below **0.225** and never
+    changes sign, whereas ``∂lnWc/∂β`` reverses on every refused line — which is
+    exactly what stops :meth:`BetaMap.evaluate_at_Wc` inverting it — and
+    ``∂lnPR/∂β`` reverses too, at the **surge peak**, on 20 of the 45. A pressure
+    scale therefore drives β the wrong way past the peak, and did: it killed
+    ``TwoStgRadialCompr`` Nc 0.600 near surge, a point the inverse holds.
+
+    ECMF enters here as a *slope of the tabulated map at the current* ``β``, not
+    as a measurement. That is the distinction §3.9 turns on: keying on a measured
+    exit ECMF closes an algebraic loop of gain 0.90–1.10 through the source's own
+    output, while reading the map's own derivative closes nothing.
 
     **The measurement stays upstream.** ``Wc`` is read at the same station as
     :class:`InletFlowCompressor`, so §3.14's property survives: the disk never
@@ -1165,13 +1176,18 @@ class FlowMatchedCompressor:
         self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
         if self.beta0 is not None:
             self._beta = float(np.clip(self.beta0, 0.0, 1.0))
-        # Cache the speed line and its log-PR slope once. Neither depends on the
-        # solver state, and `np.gradient` on the densified β grid is the same
+        # Cache the speed line and its log-ECMF slope once. Neither depends on
+        # the solver state, and `np.gradient` on the densified β grid is the same
         # piecewise-linear derivative the lookups themselves use.
-        _, wc, pr, _, _ = self.beta_map._speed_line(self.corrected_speed)
+        ecmf, wc, _, _, _ = self.beta_map._speed_line(self.corrected_speed)
         self._beta_grid = np.asarray(self.beta_map.beta, float)
         self._wc_line = wc
-        self._dlnpr = np.gradient(np.log(pr), self._beta_grid)
+        self._dlnecmf = np.gradient(np.log(ecmf), self._beta_grid)
+        if np.abs(self._dlnecmf).min() <= 0.0:
+            raise ValueError(
+                f"{getattr(self.beta_map, 'name', 'map')}: ECMF is stationary in beta at "
+                f"Nc={self.corrected_speed:.4g}, so it cannot scale the update"
+            )
 
     @property
     def beta(self) -> float:
@@ -1243,8 +1259,8 @@ class FlowMatchedCompressor:
             dt = solver.t - self._t_prev
             self._t_prev = solver.t
             wc_b = float(np.interp(self._beta, self._beta_grid, self._wc_line))
-            slope = float(np.interp(self._beta, self._beta_grid, self._dlnpr))
-            step = -self.gain * (Wc / wc_b - 1.0) / slope
+            slope = float(np.interp(self._beta, self._beta_grid, self._dlnecmf))
+            step = self.gain * (Wc / wc_b - 1.0) / slope
             nb = self._beta + (1.0 - math.exp(-dt / self._tau)) * step
             if nb < 0.0 or nb > 1.0:
                 self._clamps += 1
