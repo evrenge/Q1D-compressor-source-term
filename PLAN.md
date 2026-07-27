@@ -1391,14 +1391,30 @@ annulus line is actually drawn — gives at 601 cells:
 distribution.** A corner in the wall line is cheap to draw and expensive to
 compute next to a source term.
 
-**Correction: every staged number above is measured with the wrong instrument.**
-All of them are quoted off `disks[0].last.W`, which is `ρ·u·a_cell` at the
-sampling cell — a **cell-centred** product. The quantity the scheme conserves is
-the **face flux**, and the two are not the same in a duct with an area gradient.
-The 12-stage trace gives the tell for free: it plateaus at `W₁` = +9.03e−05 while
-`W_last` = +3.00e−05, and at a steady state the mass flow is identical at every
-station, so a threefold difference between two of them cannot be a mass-flow
-error at all.
+**Where the cell-centred probe is and is not trustworthy.** `DiskState.W` is
+`ρ·u·a_cell` at the sampling cell — a **cell-centred** product, where the scheme
+conserves the **face flux**. The 12-stage trace shows the two parting company: it
+plateaus at `W_first` = +9.03e−05 while `W_last` = +3.00e−05, and at a steady
+state the mass flow is identical at every station, so that threefold difference
+is measurement, not physics.
+
+Two separate effects, and it matters which is which:
+
+* **Area gradient.** Measured below: exact in constant area, O(Δx²) and growing
+  with `dA/dx` in a contraction.
+* **The disk's own cell.** A cell carrying a momentum source has a cell-averaged
+  `ρuA` far from the neighbouring flux, because the average represents a jump
+  inside the cell. Here those twelve cells read ~+0.158, and 12/601 × 0.158 =
+  +3.15e−03 against a measured whole-duct mean of +3.246e−03 — so a naive
+  duct-wide average of `cv[1]` is meaningless, and an early attempt at one here
+  was.
+
+**So which stations can be believed?** The *first* disk samples at cell 15 and
+the inlet flat runs to cell 24, so it sits in constant area and its reading is
+faithful. The *last* disk samples at cell 510, inside a taper, and its reading is
+not. **The +9.03e−05 plateau is therefore a real mass-flow error**, and the thing
+that was artefactual is only the `first`-vs-`last` discrepancy that prompted this
+check.
 
 Measured directly, on a contracting duct with **no source**, comparing the spread
 of cell-centred `ρuA` across the duct:
@@ -1419,22 +1435,27 @@ Consequences, in order of importance:
 * **Nothing in §3.16–§3.20 is affected.** Every one of those measurements is in a
   constant-area duct, which is the 7.68e−15 row. The single-node PR 5.040 hold at
   8.58e−12 stands.
-* **The staged figures need remeasuring** against the conserved flux, and until
-  they are, staged accuracy is *unknown* rather than poor.
-* **It is not only a diagnostic problem.** The disk's map lookup keys on the
-  sampled `W`, so in a gradient region the *operating point itself* is displaced
-  — invisibly here only because the staged rig uses a constant-PR map, where
-  `PR` and `Δh₀` do not depend on `Wc`. With a real map it would bite.
-* **The sampling station must sit inside the disk's constant-area flat.** Phase 3
+* **Staged OPR 30 converges to +9.0e−05**, monotonically and with no cycle. That
+  is a real number, taken at a station in constant area, and it is 90× outside
+  the 1e−6 gate — so the train is *stable and slightly wrong*, which is a
+  different and far better problem than §3.14 had.
+* **The sampling station belongs inside the disk's constant-area flat.** Phase 3
   chose `sample_offset = 12` by measuring the upstream numerical boundary layer
-  in a *constant-area* duct, where this effect is identically zero, so that
-  choice does not transfer. In the rig above the flat is 7 cells wide and the
-  station is 12 cells upstream — that is, in the taper. That also invalidates the
-  earlier pad = 3/10/25 test, which was reading the biased sample.
+  in a *constant-area* duct, where the gradient effect is identically zero, so
+  that choice does not transfer to a tapered machine. In the rig above the flat
+  is 7 cells wide and every station after the first sits 12 cells upstream — in
+  the taper. That also invalidates the earlier pad = 3/10/25 test, which was
+  reading a biased sample.
+* **It is not only a diagnostic problem.** The map lookup keys on the sampled
+  `W`, so a station in a gradient region displaces the *operating point itself*.
+  Invisible here only because the staged rig uses a constant-PR map, where `PR`
+  and `Δh₀` do not depend on `Wc`. With a real map it would bite, and that is the
+  first thing to fix before staging a mapped machine.
 
-**Status.** Staged accuracy: **not established**. The trains survive and settle,
-which the old injection did not, but the number that would say how well is not
-yet measured correctly.
+**Status.** Staged OPR 30, twelve stages, tapered annulus: converged, stable,
+**+9.0e−05**. Not held to the gate. The next move is not more marching — it is to
+put every sampling station inside its own constant-area flat and remeasure, since
+that is a known bias of the right order sitting directly in the closure's input.
 
 ### 3.4 Measured cost of the alternatives
 
