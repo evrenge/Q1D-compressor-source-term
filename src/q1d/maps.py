@@ -399,13 +399,30 @@ class ECMFMap:
     costs nothing, because the runtime blend then happens between speed lines
     already 9× closer together and the error goes with the square of the gap.
 
-    **This is an exact refactor, not an accuracy fix — do not conflate them.**
-    With the native nodes kept, ``PR`` and corrected work agree with
-    :meth:`BetaMap.evaluate_at_ecmf` to 0.0 and 2.2e−16: inverting a piecewise
+    **What it changes, measured.** *On a tabulated speed line* this is an exact
+    refactor: ``PR`` and corrected work agree with
+    :meth:`BetaMap.evaluate_at_ecmf` to 2.2e−16, because inverting a piecewise
     linear ECMF onto β and then interpolating a piecewise linear ``PR`` in β is
-    *the same map* as interpolating ``PR`` against ECMF directly, on shared
-    nodes. Nothing about the answer changes; β leaves the runtime, and that is
-    the whole benefit.
+    the same map as interpolating ``PR`` against ECMF directly, on shared nodes.
+
+    *Between* speed lines it is not, and cannot be. β is the correspondence
+    label, so :class:`BetaMap` blends the whole line at fixed β and then inverts;
+    without β the only option is to evaluate each bracketing line at the ECMF
+    asked for and blend the results — D13's "inverting ECMF first", which it
+    measures at 2.81% against 1.79% *at native speed spacing*. Densification is
+    what buys that back, and the residual is small rather than absent:
+
+    ===================  ==========  ==========  ==========  ==========
+    worst, mid-interval  Sub, ×9     Sub, ×36    Trans, ×9   Trans, ×36
+    ===================  ==========  ==========  ==========  ==========
+    ``PR``               4.42e−05    2.80e−06    1.20e−04    7.53e−06
+    ``CW``               2.60e−04    1.84e−05    2.13e−03    1.50e−04
+    ===================  ==========  ==========  ==========  ==========
+
+    — about 15× for a 4× refinement, so second order, with the worst points at
+    the *lowest* speeds where the supplied lines are furthest apart. Densify
+    first, convert after, and densify enough; converting a native-spacing map
+    would pay the full 2.81%.
 
     The separate, real residual is the map's β **resolution**. Measured end to
     end on ``HighPqPCompr`` Nc 0.700 f 0.85, converged mass flow is off by
