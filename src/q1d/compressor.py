@@ -1482,12 +1482,14 @@ class EcmfCompressor:
     exit_offset: int = 1
     n_smear: int = 1
     inlet_lag: float = 0.0
+    key_lag: float | None = None  # None -> same as inlet_lag
     similarity_scaling: bool = True
     last: MappedDiskState = field(default_factory=MappedDiskState)
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
     _filter: InletFilter = field(init=False, repr=False, default=None)
     _levels: LocalLevelFilter = field(init=False, repr=False, default=None)
+    _key: float = field(init=False, repr=False, default=math.nan)
     _point: object = field(init=False, repr=False, default=None)
     _t_prev: float = field(init=False, repr=False, default=math.nan)
     _reversals: int = field(init=False, repr=False, default=0)
@@ -1500,6 +1502,8 @@ class EcmfCompressor:
             raise ValueError("sample_offset must be >= 1 so the disk cell itself is not read")
         if self.exit_offset < 1:
             raise ValueError("exit_offset must be >= 1 so the station is clear of the disk")
+        if self.key_lag is not None and self.key_lag < 0.0:
+            raise ValueError(f"key_lag must be non-negative, got {self.key_lag!r}")
         self._filter = InletFilter(self.inlet_lag)
         self._levels = LocalLevelFilter(self.inlet_lag)
         self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
@@ -1584,6 +1588,7 @@ class EcmfCompressor:
         # at the start of it. Refreshing per Runge-Kutta stage would reintroduce
         # the algebraic loop this design exists to avoid.
         if self._point is None or solver.t > self._t_prev:
+            t_prev = self._t_prev if not math.isnan(self._t_prev) else solver.t
             self._t_prev = solver.t
             e = self._exit_ecmf(solver, gas, T01, p01, theta, delta)
             if math.isnan(e):
@@ -1594,7 +1599,18 @@ class EcmfCompressor:
                     )
                 self._stalls += 1
             else:
-                self._point = self.ecmf_map.evaluate(e, self.corrected_speed)
+                # Lag the key, for the reason §3.11-§3.13 lag the inlet state: an
+                # unfiltered input lets the disk hear its own acoustic echo, and
+                # that loop's gain grows with pressure ratio. Unit DC gain, so the
+                # converged answer does not depend on `key_lag`.
+                tau = self.inlet_lag if self.key_lag is None else self.key_lag
+                if tau <= 0.0 or math.isnan(self._key):
+                    self._key = e
+                else:
+                    self._key += (1.0 - math.exp(-(solver.t - t_prev) / tau)) * (
+                        e - self._key
+                    )
+                self._point = self.ecmf_map.evaluate(self._key, self.corrected_speed)
 
         point = self._point
         dh0 = point.corrected_work * theta
