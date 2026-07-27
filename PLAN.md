@@ -1252,13 +1252,21 @@ tuning altogether. On the same case:
 
 | β rate | W error | clamps |
 | --- | --- | --- |
-| `gain` 0.3 — slower | +1.736e−01 | 53 095 |
+| `gain` 0.03 | −1.389e−01 | 43 175 |
+| `gain` 0.1 | +3.314e−01 | 52 245 |
+| `gain` 0.3 | +1.736e−01 | 53 095 |
 | **`gain` 1.0** | **−1.896e−02** | **36 846** |
 | secant, ≈6.6× faster | +2.423e−01 | 51 165 |
 
-The default sits near a local optimum and both neighbours are an order of
-magnitude worse. A step-size problem has a step size that fixes it; this does
-not, because there is no isolated root to step toward.
+The default is the best of the five and every other is 7–17× worse. More telling
+than the ranking is that the slow end is **not monotone** — 0.3, 0.1 and 0.03
+give +1.74e−01, +3.31e−01 and −1.39e−01. A converging process ordered by rate
+would not do that. None of them converge; the reported number is wherever the run
+happened to be at step 119 999. A step-size problem has a step size that fixes
+it. This does not, because there is no isolated root to step toward.
+
+Scope: four rates on one cell, `HighPqPCompr` Nc 0.700 f = 0.85. Enough to rule
+out rate as *the* explanation there, not enough to claim it for every cell.
 
 *The trace shows a growing oscillation.* It does not. A 2000-step trace of the
 same case looked like one; per-step output shows a well-formed update reducing
