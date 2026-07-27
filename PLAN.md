@@ -1189,6 +1189,66 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.36 The exit station was reading across the source jump — one cell fixed it
+
+§3.35 measures the exit station under-reading ECMF by 4.6% at PR 4 and 35% at
+PR 25, on the exact seeded design field, and leaves the cause open. Decomposing
+the reading finds it immediately:
+
+| PR | ``W`` ratio | ``T₀₂`` ratio | ``p₀₂`` ratio | ECMF ratio |
+| --- | --- | --- | --- | --- |
+| 3.95 | **0.947** | 0.991 | 0.989 | 0.954 |
+| 15.88 | **0.763** | 0.985 | 0.986 | 0.768 |
+| 21.85 | **0.684** | 0.982 | 0.986 | 0.688 |
+| 25.13 | **0.643** | 0.981 | 0.986 | 0.646 |
+
+Stagnation pressure and temperature are right to 1–2%. The whole error is the
+**mass flux** — on a field where mass flux is uniform by construction.
+
+**The cause.** `station_state_at` reads a cell's *upstream* face. At
+`exit_offset` 1 that face lies between the last forced cell and the first
+unforced one, and those states differ by one cell's share of the source: at PR 25
+with `n_smear` 7 a **58% pressure jump across a single face**. Roe's dissipation
+term scales with the state jump and corrupts the mass flux across it. At
+`exit_offset` ≥ 2 both cells straddling the face carry the same state, the jump
+is zero, and the flux is exact:
+
+| PR | offset 1 | offset 2 | offset 3 |
+| --- | --- | --- | --- |
+| 3.95 | 0.9539 | 0.9983 | **1.0000** |
+| 15.88 | 0.7681 | 0.9970 | **1.0000** |
+| 21.85 | 0.6881 | 0.9972 | **1.0000** |
+| 25.13 | 0.6460 | 0.9973 | **1.0000** |
+
+**End to end, on the cells that died:**
+
+| case | offset 1 | offset 2 | offset 3 |
+| --- | --- | --- | --- |
+| Nc 1.000 f 0.50, PR 21.846 | died 1399 | **+3.7218e−08** | +3.7221e−08 |
+| Nc 0.975 f 0.85, PR 16.591 | died **2** | **+1.8625e−07** | +1.8625e−07 |
+| Nc 1.025 f 0.50, PR 23.470 | died 1063 | **+8.4293e−08** | +8.4292e−08 |
+
+All with `off_table` = **0**: with a correct reading the demand never leaves the
+table, and the failure chain never starts. Offsets 2 and 3 agree to five digits,
+as they must — both read a face with no jump across it.
+
+**How it got in, which is the part worth remembering.** §3.30 chose
+`exit_offset` 1 by measuring offsets 1, 2 and 3 as "identical to five digits" at
+PR 3.36 and taking the closest, because 4 and 8 destabilise through transport
+delay. At PR 3.36 the offset-1 error is 4.6% and the closure absorbs it entirely
+— so the measurement that chose the default was *structurally incapable of
+seeing what it was choosing*. The same shape of mistake as the `ECMFMap`
+equivalence test in §3.30, which sampled only tabulated speeds.
+
+Default is now `exit_offset` 2, with 3 equally good and 4+ excluded by §3.30.
+`tests/test_flowmatch.py` pins the *jump across the read face* rather than a
+converged answer at one pressure ratio, because that is the quantity that
+actually differs.
+
+**Scope.** This is measured on `HighPqPCompr` and on the seeded field for four
+operating points. The full four-map sweep has not been re-run with
+`exit_offset` 2, so §3.33's 261/315 stands as the last complete figure.
+
 ### 3.35 The exit station under-reads ECMF, and the error scales with PR
 
 §3.34 leaves one family unexplained: the deaths on `HighPqPCompr` Nc 0.975–1.025

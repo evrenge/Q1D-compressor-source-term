@@ -291,3 +291,60 @@ class TestCompositeSource:
         q = CompositeSource(disk, other)(s)
         assert q[1, disk.cell] != 0.0 and q[1, disk.cell + 20] != 0.0
         assert math.isclose(q[1].sum(), disk.last.Fx + other.last.Fx, rel_tol=1e-12)
+
+
+class TestTheExitStationMustClearTheSourceJump:
+    """Why ``exit_offset`` may not be 1, pinned where the sweep could not see it.
+
+    ``station_state_at`` reads a cell's *upstream* face. At ``exit_offset`` 1 that
+    face lies between the last forced cell and the first unforced one, so the two
+    states straddling it differ by one cell's share of the source. Roe's
+    dissipation scales with that jump and corrupts the **mass flux** across it —
+    which goes straight into ``ECMF = Wc·√τ/PR``.
+
+    The trap is that it is invisible where it was first measured. At PR 3.4 the
+    error is ~4.6% and the closure absorbs it, so offsets 1, 2 and 3 look
+    identical; at PR 25 it is 36% and the demand lands below the bottom of the
+    map. This test therefore checks the *jump across the read face*, which is the
+    thing that actually differs, rather than a converged answer at one PR.
+    """
+
+    def _seeded(self, n_smear, path=INVERTIBLE[0], speed=INVERTIBLE[1], frac=0.5):
+        s, disk, d = build(path, speed, frac=frac, n_smear=n_smear)
+        return s, disk, d
+
+    @pytest.mark.parametrize("n_smear", [1, 7])
+    def test_offset_one_reads_across_the_source_jump_and_offset_two_does_not(self, n_smear):
+        s, disk, _ = self._seeded(n_smear)
+        s.residual()  # populate the cached face fluxes
+        last = disk.cell + n_smear - 1
+        p = s.p[1:-1]
+        # offset 1 reads the face between the last forced cell and the next
+        across = abs(p[last + 1] / p[last] - 1.0)
+        # offset 2 reads one further out, both sides unforced
+        beyond = abs(p[last + 2] / p[last + 1] - 1.0)
+        assert across > 10.0 * beyond, (
+            f"premise gone: the jump at offset 1 ({across:.3e}) is no longer far "
+            f"larger than at offset 2 ({beyond:.3e})"
+        )
+
+    def test_the_default_clears_the_jump(self):
+        m = load_beta_map(INVERTIBLE[0], GAS).densify(9)
+        from q1d.compressor import EcmfCompressor
+        from q1d.maps import ECMFMap
+
+        disk = EcmfCompressor(cell=50, ecmf_map=ECMFMap.from_beta_map(m),
+                              corrected_speed=INVERTIBLE[1])
+        assert disk.exit_offset >= 2, (
+            "exit_offset 1 reads the face carrying the source jump; at PR 25 that "
+            "reads the mass flux 36% low and puts the demand off the table"
+        )
+
+    def test_offset_one_is_still_constructible(self):
+        """It is wrong, not forbidden — the negative result needs to stay runnable."""
+        m = load_beta_map(INVERTIBLE[0], GAS).densify(9)
+        from q1d.compressor import EcmfCompressor
+        from q1d.maps import ECMFMap
+
+        EcmfCompressor(cell=50, ecmf_map=ECMFMap.from_beta_map(m),
+                       corrected_speed=INVERTIBLE[1], exit_offset=1)

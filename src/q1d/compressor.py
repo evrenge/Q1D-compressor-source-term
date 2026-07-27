@@ -1469,10 +1469,36 @@ class EcmfCompressor:
     map densification, and vanishes entirely against an
     :class:`~q1d.maps.ECMFMap`, which reproduces its own key to 2.2e−16.
 
-    **Station placement.** ``exit_offset`` 1, 2 and 3 give identical answers to
-    five digits; 4 and 8 do not converge, with clamping appearing at 8. The
-    transport delay from disk to station enters the t−1 path, and beyond ~3 cells
-    it destabilises the loop. Default 1, which reads the disk's own exit face.
+    **Station placement — ``exit_offset`` 2 or 3, never 1.** ``station_state_at``
+    reads a cell's *upstream* face. At ``exit_offset`` 1 that face sits between
+    the last forced cell and the first unforced one, and those two states differ
+    by one cell's share of the source — at PR 25 with ``n_smear`` 7 a **58%
+    pressure jump across a single face**. Roe's dissipation term scales with the
+    state jump, and it corrupts the *mass flux* there: measured on the exact
+    seeded design field, ``W`` reads **36% low** at PR 25, which carries straight
+    into ECMF because stagnation pressure and temperature are right to 1–2%.
+
+    At ``exit_offset`` ≥ 2 both cells straddling the face carry the same state,
+    the jump is zero, and the flux is exact. Reading against the design value:
+
+    ======  ========  ========  ========
+    PR      offset 1  offset 2  offset 3
+    ======  ========  ========  ========
+    3.95    0.9539    0.9983    **1.0000**
+    15.88   0.7681    0.9970    **1.0000**
+    21.85   0.6881    0.9972    **1.0000**
+    25.13   0.6460    0.9973    **1.0000**
+    ======  ========  ========  ========
+
+    The consequence of getting this wrong is not a small bias. The ECMF table is
+    only ~38% wide, so above PR ≈ 16 the very first reading falls *below the
+    table*, the disk applies the speed line's **maximum** PR — 26.885 against a
+    design 21.846 — and the resulting 23% over-pressure drives the flow
+    supersonic and kills the run (``PLAN.md`` §3.35, §3.36).
+
+    Do not go past 3: §3.30 measured offsets 4 and 8 as failing to converge,
+    because the transport delay from disk to station enters the t−1 path. Two and
+    three are the usable values and they agree to five digits.
 
     **Use ``inlet_lag = key_lag = 1e-2``. Smaller is not faster and is not
     safe.** Both filters have unit DC gain, so ``tau`` cannot move the answer —
@@ -1503,7 +1529,7 @@ class EcmfCompressor:
     ecmf_map: object  # ECMFMap; annotated loosely to avoid a circular import
     corrected_speed: float
     sample_offset: int = 2
-    exit_offset: int = 1
+    exit_offset: int = 2
     n_smear: int = 1
     inlet_lag: float = 0.0
     key_lag: float | None = None  # None -> same as inlet_lag
