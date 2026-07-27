@@ -392,14 +392,19 @@ class ActuatorDisk:
 
         # Measured upstream, where the field is clean. `i` indexes the full
         # cell array (ghost at 0), hence the +1 on the interior index.
-        i = self.cell - self.sample_offset + 1
-        rho, u, p, c = solver.primitives()
-        rho_i, u_i, p_i = float(rho[i]), float(u[i]), float(p[i])
-
-        T = p_i / (rho_i * gas.R)
-        mach = u_i / float(c[i])
+        # Read the station from the conserved fluxes, not from cell-centred
+        # primitives. The "numerical boundary layer" Phase 3 measured upstream of
+        # the disk is the error of averaging a sharp profile over a cell, not a
+        # property of the field: read this way the stagnation state is exact one
+        # cell from the disk, where the cell-centred reading is off by 1.9e-04
+        # and needs twelve cells to recover (`PLAN.md` 3.23). That is ~11 cells
+        # per blade row of mesh budget.
+        idx = self.cell - self.sample_offset
+        st = solver.station_state_at(idx)
+        T = st.p / (st.rho * gas.R)
+        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
         T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = p_i * (T01 / T) ** gas.g_over_gm1
+        p01 = st.p * (T01 / T) ** gas.g_over_gm1
         # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
         # product is uniform only to O(dx^2) where the area has curvature, and
         # that bias feeds the map lookup, so it moves the operating point rather
@@ -765,13 +770,16 @@ class InletFlowCompressor:
         if not np.all(grid.a_face[self.cell : last_cell + 2] == area):
             raise ValueError("area varies across the disk cells; see PLAN.md §4.5")
 
-        i = self.cell - self.sample_offset + 1
-        rho, u, p, c = solver.primitives()
-        rho_i, u_i, p_i = float(rho[i]), float(u[i]), float(p[i])
-        T = p_i / (rho_i * gas.R)
-        mach = u_i / float(c[i])
+        # Read the station from the conserved fluxes rather than from
+        # cell-centred primitives -- see `Solver.station_state_at` and
+        # `PLAN.md` 3.23. Exact one cell from the disk, where the cell-centred
+        # reading is off by 1.9e-04.
+        idx = self.cell - self.sample_offset
+        st = solver.station_state_at(idx)
+        T = st.p / (st.rho * gas.R)
+        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
         T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = p_i * (T01 / T) ** gas.g_over_gm1
+        p01 = st.p * (T01 / T) ** gas.g_over_gm1
         # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
         # product is uniform only to O(dx^2) where the area has curvature, and
         # that bias feeds the map lookup, so it moves the operating point rather
@@ -946,13 +954,16 @@ class UnsteadyMappedCompressor:
         if not np.all(grid.a_face[self.cell : last_cell + 2] == area):
             raise ValueError("area varies across the disk cells; see PLAN.md §4.5")
 
-        i = self.cell - self.sample_offset + 1
-        rho, u, p, c = solver.primitives()
-        rho_i, u_i, p_i = float(rho[i]), float(u[i]), float(p[i])
-        T = p_i / (rho_i * gas.R)
-        mach = u_i / float(c[i])
+        # Read the station from the conserved fluxes rather than from
+        # cell-centred primitives -- see `Solver.station_state_at` and
+        # `PLAN.md` 3.23. Exact one cell from the disk, where the cell-centred
+        # reading is off by 1.9e-04.
+        idx = self.cell - self.sample_offset
+        st = solver.station_state_at(idx)
+        T = st.p / (st.rho * gas.R)
+        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
         T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = p_i * (T01 / T) ** gas.g_over_gm1
+        p01 = st.p * (T01 / T) ** gas.g_over_gm1
         # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
         # product is uniform only to O(dx^2) where the area has curvature, and
         # that bias feeds the map lookup, so it moves the operating point rather
@@ -976,7 +987,7 @@ class UnsteadyMappedCompressor:
             self._beta = target
             self._t_prev = solver.t
             row_length = float(grid.x_face[last_cell + 1] - grid.x_face[self.cell])
-            self._tau = self.tau if self.tau is not None else row_length / max(u_i, 1e-9)
+            self._tau = self.tau if self.tau is not None else row_length / max(st.u, 1e-9)
         elif solver.t > self._t_prev:
             # Advance once per *step*, not once per Runge-Kutta stage.
             dt = solver.t - self._t_prev

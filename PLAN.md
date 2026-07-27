@@ -1560,6 +1560,62 @@ one thing moves, and the cheapest check is to write down what else changed when
 the swept parameter did. **Flat width remains untested**; the two attempts at it
 both varied the taper gradient as well.
 
+### 3.23 The upstream "boundary layer" was the probe, and it cost 10 cells a row
+
+Phase 3 measured the disk perturbing the field *upstream* of itself, decaying
+~10× every two to three cells, and set `sample_offset = 12` to clear it. That
+default has been paid on every blade row since, and for an engine with twenty
+rows it is a large fraction of the mesh.
+
+It was never in the field. It is the error of averaging a sharp profile over a
+cell. The scheme conserves **face fluxes**, and inverting those back to a state
+(`Solver.station_state_at`, via `analytic.state_from_flux`) gives a station
+reading that is exact right next to the disk. Converged single disk, `p01` error
+against the known inlet value:
+
+| `sample_offset` | cell-centred | from the flux |
+| --- | --- | --- |
+| 1 | −1.933e−04 | **−8.9e−12** |
+| 3 | −1.074e−05 | **−9.1e−12** |
+| 8 | +1.475e−08 | −9.4e−12 |
+| 12 | +3.623e−11 | −9.6e−12 |
+| 24 | −1.146e−11 | −1.2e−11 |
+
+Flat at every standoff. It holds at PR 1.2, 1.6 and 2.0, with and without a
+downstream taper — five configurations; the sixth (PR 2.0, constant area) is bad
+for *both* probes and worsens with offset, which is the signature of an
+unconverged field rather than a probe difference.
+
+On the six-stage train the offset drops from 12 to 2 for nothing: −1.273e−05
+against −1.383e−05 at 601 cells.
+
+**Careful with the arithmetic, though.** Ten cells a row is real but it is not
+the whole budget — the inter-stage `gap` dominates. What the mesh actually buys,
+six stages, offset 2, same 1 m duct:
+
+| cells/stage | mass-flow error |
+| --- | --- |
+| 25 | −2.004e−03 |
+| 33 | −6.441e−04 |
+| 50 | −1.427e−04 |
+| 66 | −5.118e−05 |
+| 150 | −4.482e−06 |
+
+So **33–50 cells per blade row** is the sensible engine-model range, giving
+1e−4 to 6e−4 — ample for performance work — and a twenty-row engine lands near
+800 cells rather than the 3000 the earlier 150-cells-per-stage figure implied.
+
+**The flux probe needs a fallback and this is not padding.** During a startup
+transient an intermediate face flux can correspond to *no* physical state, and
+the inversion raises on a negative discriminant where the cell-centred product
+just returns a number. `station_state_at` catches that and falls back to the
+cell-centred reading, which costs nothing at convergence — where the flux value
+is the one used, and is exact.
+
+`tests/test_compressor.py` now pins the opposite property to the one it was
+written for: every standoff from 1 to 12 clears the gate and they agree with
+each other to 1e−9, where the old test asserted a monotone decay.
+
 ### 3.22 Designing for bleed and cooling flows, before they arrive
 
 Interstage bleed and turbine cooling air are planned, and they make ``q[0] ≠ 0``.

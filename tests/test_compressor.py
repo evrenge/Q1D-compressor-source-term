@@ -184,16 +184,28 @@ def test_disk_measures_the_upstream_state_it_is_supposed_to():
     assert disk.last.SWx == pytest.approx(exact.SWx, rel=1e-6)
 
 
-def test_sampling_distance_sensitivity_decays_and_sets_the_default():
-    """PLAN.md §7 Q1 said measurement would decide this, and it did.
+def test_sampling_distance_barely_matters_now_that_the_station_reads_fluxes():
+    """PLAN.md §7 Q1 said measurement would decide this. It did, then it changed.
 
-    The disk perturbs the field *upstream* as well as downstream — a numerical
-    boundary layer from the reconstruction stencil, not a physical one. Its
-    influence decays geometrically with standoff, and the default is chosen
-    from where that decay clears the gate rather than assumed.
+    **The original finding.** The disk appeared to perturb the field *upstream*
+    of itself — a numerical boundary layer from the reconstruction stencil —
+    whose influence decayed by ~10x every two to three cells, so the default
+    standoff was set to 12 cells to clear it. Measured ``p01`` error at the
+    station: −1.9e−04 at offset 1, −1.1e−05 at 3, +3.6e−11 at 12.
 
-    This test would have caught the original default of 3, which sat inside the
-    layer and cost 1.8e-5 in mass flow.
+    **What it actually was.** Not the field: the error of averaging a sharp
+    profile over a cell. The scheme conserves *face fluxes*, and reading the
+    station from those instead — :meth:`Solver.station_state_at` — is exact one
+    cell from the disk: −8.9e−12 at offset 1, −9.6e−12 at 12, flat throughout,
+    and it holds at PR 1.2/1.6/2.0 with and without a downstream taper
+    (``PLAN.md`` §3.23).
+
+    So this test now pins the opposite property to the one it was written for.
+    That is worth roughly **ten cells per blade row** of mesh budget, which is
+    the difference between an affordable engine model and an unaffordable one.
+
+    ``sample_offset`` is kept as a parameter — there are physical reasons to
+    stand a station off — but it is no longer paying for a numerical artefact.
     """
     errors = {}
     for offset in (1, 3, 5, 8, 12):
@@ -202,13 +214,13 @@ def test_sampling_distance_sensitivity_decays_and_sets_the_default():
         assert result.converged, f"offset {offset} did not converge"
         errors[offset] = abs(W / exact.W - 1.0)
 
-    # monotone decay, by roughly an order of magnitude every 2-3 cells
-    for near, far in ((1, 3), (3, 5), (5, 8), (8, 12)):
-        assert errors[far] < errors[near], f"error grew from offset {near} to {far}: {errors}"
+    # every standoff clears the gate now, including sampling right next door
+    for offset, err in errors.items():
+        assert err < 1e-9, f"offset {offset} missed the gate: {err:.3e}"
 
-    # sampling inside the layer misses the gate; the default clears it
-    assert errors[3] > 1e-8, "offset 3 should be inside the boundary layer"
-    assert errors[12] < 1e-9, f"default offset must clear the gate, got {errors[12]:.3e}"
+    # and they agree with each other: no decay left to see
+    spread = max(errors.values()) - min(errors.values())
+    assert spread < 1e-9, f"readings still depend on standoff: {errors}"
 
 
 @pytest.mark.parametrize("n_smear", [1, 3, 7])

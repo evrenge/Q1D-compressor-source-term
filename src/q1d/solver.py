@@ -392,6 +392,58 @@ class Solver:
             f = self.face_fluxes()
         return float(f[0, cell])
 
+    def station_state_at(self, cell: int):
+        """Static state at an interior cell's upstream face, from the fluxes.
+
+        The companion to :meth:`mass_flux_at` for the rest of the state. The
+        conserved fluxes are inverted back to ``(rho, u, p)`` by
+        :func:`analytic.state_from_flux`, giving a station reading consistent
+        with what the scheme transports rather than with a cell average of it.
+
+        **This is what removes the "numerical boundary layer".** Phase 3 measured
+        the disk contaminating the field upstream of itself, decaying ~10x every
+        two to three cells, and chose ``sample_offset = 12`` to clear it. That
+        contamination is not in the field — it is the error of averaging a sharp
+        profile over a cell. Read from the fluxes, the stagnation state is exact
+        one cell from the disk. Measured on a converged single-disk case, ``p01``
+        error against the known inlet value:
+
+        ==========  ================  ==============
+        ``offset``  cell-centred      from the flux
+        ==========  ================  ==============
+        1           −1.933e−04        −8.9e−12
+        3           −1.074e−05        −9.1e−12
+        12          +3.6e−11          −9.6e−12
+        ==========  ================  ==============
+
+        Flat at every offset, and it holds at PR 1.2/1.6/2.0 with and without a
+        downstream taper. The practical consequence is roughly **eleven cells per
+        blade row** returned to the mesh budget, which matters once an engine has
+        twenty of them (``PLAN.md`` §3.23).
+
+        Falls back to the cell-centred reading when the flux inversion has no
+        solution. Not defensive padding: during a startup transient an
+        intermediate face flux can correspond to *no* physical state, and the
+        inversion raises on a negative discriminant where the cell-centred
+        product simply returns a number. The fallback costs nothing at
+        convergence — where the flux reading is the one used, and is exact — and
+        keeps a run alive through the transient that would otherwise hit it.
+        """
+        from .analytic import InfeasibleOperatingPoint, StaticState, state_from_flux
+
+        f = self._face_flux
+        if f is None:
+            f = self.face_fluxes()
+        try:
+            return state_from_flux(f[:, cell], float(self.grid.a_face[cell]), self.gas)
+        except InfeasibleOperatingPoint:
+            rho, u, p, c = self.primitives()
+            i = cell + 1  # primitives carry ghost cells
+            r, uu, pp, cc = float(rho[i]), float(u[i]), float(p[i]), float(c[i])
+            return StaticState(
+                p=pp, T=pp / (r * self.gas.R), rho=r, u=uu, M=uu / cc, c=cc
+            )
+
     def residual(self) -> np.ndarray:
         """``d(flux)/dx - sources`` over the interior cells, shape ``(3, n)``.
 
