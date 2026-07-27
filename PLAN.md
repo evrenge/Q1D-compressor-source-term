@@ -1290,10 +1290,14 @@ twelfth having never failed under any configuration.)*
 
 | count | what | status |
 | --- | --- | --- |
-| ~28 | off-table clamp at the exact table ends | §3.34 — fixed by moving 1% inside, −7.5e−02 → +4.1e−08 |
-| 7 | radial f = 0.15, past the PR peak | correct physics |
-| 3 | map β-resolution near-misses, ~1e−06 | order 2.18 in `densify`; 72 clears them |
-| ~5 | choke-end clamp at high PR | same clamp, partially improved by the station fix |
+| **32** | off-table clamp at the exact table ends — 18 at f = 0.0, 14 at f = 1.0 | §3.34 diagnosed it and showed 1% inside the table gives −7.5e−02 → +4.1e−08. **That fix is not applied.** These are the PR residuals still visible in every table above. |
+| 8 | radial f = 0.15, past the PR peak — 7 deaths and one −7.2e−01 | correct physics, not a defect |
+| 3 | map β-resolution near-misses, ~1e−06 (Nc 0.600/0.650, f = 0.65/0.85) | order 2.18 in `densify`; 72 clears them |
+
+Counted, not estimated. An earlier draft of this table said ~28 / 7 / 3 / ~5, splitting
+the clamp across two rows and filing the −7.2e−01 surge cell under the clamp; the
+split above is the measured one. **Of the 43, only the 32 are outstanding work** —
+and a single clamp fix would take the library to roughly 304/315.
 
 **One prediction was wrong and is worth recording.** I expected the choke-end
 cells (f = 1.0) to clear, having assigned them to the station. They improve —
