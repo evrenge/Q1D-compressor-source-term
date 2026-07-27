@@ -1266,9 +1266,34 @@ signed and monotone in PR — §3.34's off-table clamp, which that section
 demonstrates is fixed by moving 1% inside the table (−7.54e−02 → +4.14e−08 on
 this map). Not a closure defect.
 
-`TwoStgRadialCompr` reproduces offset 1 row for row: its failures are clamp and
-surge only, and it has no station-limited cells — consistent, since its deaths
-were always at f = 0.15 on the surge branch rather than in the interior.
+`TwoStgRadialCompr` reproduces offset 1 almost row for row — **69/98** against
+68/98 — because its failures are clamp and surge, not station. Its one gain is
+Nc 1.100 f = 0.5 at PR 17.067, which died at offset 1 and holds now. Deaths there
+go 8 → 7, and the seven are the f = 0.15 surge column.
+
+**The library, complete:**
+
+| map | before today | after §3.32 | **final** |
+| --- | --- | --- | --- |
+| `SubsonicCompressor` | 80/84 | 84/84 | **84/84** |
+| `TranssonicCompressor` | 20/45, five lines unbuildable | 63/63 | **63/63** |
+| `HighPqPCompr` | 21/70 | 46/70 | **56/70** |
+| `TwoStgRadialCompr` | — | 68/98 | **69/98** |
+| **total** | — | 261/315 | **272/315 (86.3%)** |
+| on lines the inverse refuses | 0/91 by construction | 64/91 | **75/91 (82%)** |
+
+*(The `SubsonicCompressor` figure is carried from the offset-1 run: the re-sweep
+was stopped at 11 of 12 rows once it had reproduced all 11 identically, the
+twelfth having never failed under any configuration.)*
+
+**Every remaining failure is characterised**, which has not been true before:
+
+| count | what | status |
+| --- | --- | --- |
+| ~28 | off-table clamp at the exact table ends | §3.34 — fixed by moving 1% inside, −7.5e−02 → +4.1e−08 |
+| 7 | radial f = 0.15, past the PR peak | correct physics |
+| 3 | map β-resolution near-misses, ~1e−06 | order 2.18 in `densify`; 72 clears them |
+| ~5 | choke-end clamp at high PR | same clamp, partially improved by the station fix |
 
 **One prediction was wrong and is worth recording.** I expected the choke-end
 cells (f = 1.0) to clear, having assigned them to the station. They improve —
