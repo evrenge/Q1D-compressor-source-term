@@ -1189,6 +1189,78 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.34 Family A was two mechanisms wearing the same clothes
+
+§3.33's sweep leaves the two β-end columns failing on both high-pressure maps,
+mirror-signed and growing smoothly with PR over four decades — 17 cells that look
+like one phenomenon. They are two, and only locating each line's **PR peak**
+separates them.
+
+**Moving the design point inward from each end.** `HighPqPCompr` Nc 0.950:
+
+| f | 0.00 | 0.01 | 0.02 | 0.05 | 0.10 | 0.20 |
+| --- | --- | --- | --- | --- | --- | --- |
+| surge end | **−7.54e−02** | +4.14e−08 | +4.23e−08 | +2.03e−08 | +4.40e−08 | +1.35e−08 |
+
+| f | 1.00 | 0.99 | 0.98 | 0.95 | 0.90 | 0.80 |
+| --- | --- | --- | --- | --- | --- | --- |
+| choke end | **+2.08e−03** | +1.34e−07 | +2.22e−07 | +4.04e−08 | +1.90e−07 | +8.01e−08 |
+
+A **step, not a slope**: ten of ten interior points hold at 1e−08 to 2e−07, at
+PR 13.2 to 19.1, on a line that scored 0/7 before §3.32. Only the exact endpoints
+fail, and they fail because the design ECMF sits at margin **0.00000** from the
+table end — checked directly against the tabulated range.
+
+**Mechanism 1 — off-table clamp.** The map holds no information past its ends and
+§3.8 measures extrapolation as the worst error source on these maps, so clamping
+is the correct *action*. But a clamped lookup leaves the operating point pinned
+with no restoring force outward, and the run converges to the edge of the data
+rather than to an answer. `ECMFMap.off_table` and `EcmfCompressor.off_table` now
+count it; **a converged run with a non-zero count is not to be trusted.**
+
+**Mechanism 2 — the surge branch, and the model is right.** The same scan on
+`TwoStgRadialCompr` Nc 1.000 does *not* recover 1% inside, and the reason is that
+this line's PR peak is not at the end:
+
+| line | PR peak at | so f = 0 is |
+| --- | --- | --- |
+| `HighPqPCompr` Nc 0.950 | f = **0.0000** | at the peak *and* at the table end |
+| `TwoStgRadialCompr` Nc 1.000 | f = **0.0948** | **past** the peak, on the rising branch |
+
+| f | PR | against peak 15.981 | result |
+| --- | --- | --- | --- |
+| 0.00 | 15.841 | past peak | −3.24e−02 |
+| 0.02 | 15.841 | past peak | −3.41e−02 |
+| 0.05 | 15.914 | past peak | **DIED** |
+| 0.10 | 15.981 | *at* the peak | **DIED** |
+| **0.20** | 15.689 | 1.8% below | **+2.54e−08 HELD** |
+
+Everything on or beyond the peak fails; the first genuinely stable point holds at
+2.5e−08. A positively-sloped branch is what surge *is*, and no throttle holds a
+machine there either.
+
+**This closes §3.27's oldest open item.** That section recorded two
+`TwoStgRadialCompr` cells with *falling* but nearly flat slopes (−0.014,
+−0.0062) that failed anyway, and could not explain them. On Nc 1.000 the PR at
+f = 0.15 is 15.8934 against a peak of 15.9808 — **0.5% below peak**. The branch
+is falling, but so flat that it carries no restoring force. The flatness was the
+answer, and §3.27's own numbers said so.
+
+**Methodological note.** The two mechanisms are indistinguishable in the sweep
+table — same column, same sign, same PR scaling — because both maps happen to put
+their difficult region at f ≈ 0. Grouping failures by *where they appear* rather
+than by *what the map is doing there* produced a single "Family A" that did not
+exist. The discriminator was one cheap map computation: locate `argmax(PR)` per
+speed line.
+
+**Consequence for the sweep grid.** Testing at f = 0.0 and f = 1.0 exactly means
+testing the boundary of the data, and on some lines it also means testing the
+statically unstable branch. Both are legitimate robustness probes, but neither is
+an operating point, and scoring them alongside interior cells understates the
+closure. A grid that reported them separately — and that placed the surge-side
+probe relative to each line's own PR peak rather than at a fixed f — would
+measure what it intends to.
+
 ### 3.33 The filters cannot be made cheaper, and the sweep with both fixes
 
 **Both fixes together, all four maps, same grid as §3.27** — every tabulated
