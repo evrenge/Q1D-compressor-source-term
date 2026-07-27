@@ -1166,6 +1166,7 @@ class FlowMatchedCompressor:
     tau: float | None = None  # None -> blade-row through-flow time
     beta0: float | None = None  # None -> start at mid-line
     secant: bool = False  # default flips once the sweep justifies it
+    exit_offset: int | None = None  # not None -> key on measured exit ECMF
     last: MappedDiskState = field(default_factory=MappedDiskState)
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
@@ -1189,6 +1190,8 @@ class FlowMatchedCompressor:
             raise ValueError(f"tau must be positive, got {self.tau!r}")
         if not self.gain > 0.0:
             raise ValueError(f"gain must be positive, got {self.gain!r}")
+        if self.exit_offset is not None and self.exit_offset < 1:
+            raise ValueError("exit_offset must be >= 1 so the station is clear of the disk")
         self._filter = InletFilter(self.inlet_lag)
         self._levels = LocalLevelFilter(self.inlet_lag)
         self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
@@ -1200,6 +1203,7 @@ class FlowMatchedCompressor:
         ecmf, wc, _, _, _ = self.beta_map._speed_line(self.corrected_speed)
         self._beta_grid = np.asarray(self.beta_map.beta, float)
         self._wc_line = wc
+        self._ecmf_line = ecmf
         self._dlnecmf = np.gradient(np.log(ecmf), self._beta_grid)
         if np.abs(self._dlnecmf).min() <= 0.0:
             raise ValueError(
@@ -1240,6 +1244,36 @@ class FlowMatchedCompressor:
         with nothing to measure, the map slope is the only estimate there is.
         """
         return self._secant_uses
+
+    def _measure_exit_ecmf(self, solver, gas, T01, p01, theta, delta) -> float:
+        """``ECMF = Wc·√τ/PR`` with ``τ`` and ``PR`` read from the field.
+
+        The station sits ``exit_offset`` cells past the last forced cell, read
+        from the conserved fluxes like every other station here, so a mass source
+        between the disk and the station would be accounted for rather than
+        silently violating the reading.
+        """
+        idx = self.cell + self.n_smear - 1 + self.exit_offset
+        if idx >= solver.grid.n_interior:
+            raise ValueError(
+                f"exit station at interior cell {idx} is outside the "
+                f"{solver.grid.n_interior}-cell duct"
+            )
+        try:
+            st = solver.station_state_at(idx)
+        except Exception:  # noqa: BLE001 -- a transient can make the flux infeasible
+            return math.nan
+        w = solver.mass_flux_at(idx)
+        if w <= 0.0 or st.p <= 0.0 or st.rho <= 0.0:
+            return math.nan
+        t = st.p / (st.rho * gas.R)
+        m2 = st.u * st.u / (gas.gamma * gas.R * t)
+        t02 = t * (1.0 + 0.5 * gas.gm1 * m2)
+        p02 = st.p * (t02 / t) ** gas.g_over_gm1
+        pr, tau = p02 / p01, t02 / T01
+        if pr <= 0.0 or tau <= 0.0:
+            return math.nan
+        return (w * math.sqrt(theta) / delta) * math.sqrt(tau) / pr
 
     def __call__(self, solver: Solver) -> np.ndarray:
         from .analytic import static_from_stagnation
@@ -1285,8 +1319,23 @@ class FlowMatchedCompressor:
             # Advance once per *step*, not once per Runge-Kutta stage.
             dt = solver.t - self._t_prev
             self._t_prev = solver.t
-            wc_b = float(np.interp(self._beta, self._beta_grid, self._wc_line))
-            residual = Wc / wc_b - 1.0
+            if self.exit_offset is None:
+                wc_b = float(np.interp(self._beta, self._beta_grid, self._wc_line))
+                residual = Wc / wc_b - 1.0
+            else:
+                # Key on ECMF formed from the FIELD downstream of the disk, using
+                # the state as it stands at the start of this step -- one step
+                # behind the beta about to be computed, so no algebraic loop is
+                # closed. At convergence this is the same root as the inlet form
+                # (`PLAN.md` §3.26); on the way in it is not the same path,
+                # because the measured p02 carries the duct's actual response
+                # rather than the disk's assertion of it.
+                e_meas = self._measure_exit_ecmf(solver, gas, T01, p01, theta, delta)
+                if math.isnan(e_meas):
+                    residual = 0.0
+                else:
+                    e_b = float(np.interp(self._beta, self._beta_grid, self._ecmf_line))
+                    residual = e_meas / e_b - 1.0
             # The map slope is the fallback estimate of dR/dbeta; it assumes the
             # duct constant c = 1. Where the run has moved far enough to say
             # otherwise, believe the run (see `secant`).
