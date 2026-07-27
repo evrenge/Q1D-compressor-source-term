@@ -165,10 +165,21 @@ class BetaMap:
         PR = stretch(self.PR)
         corrected_work = stretch(self.corrected_work)
 
-        dh0s = self.gas.cp * T_REF * (PR**self.gas.gm1_over_g - 1.0)
         tau = 1.0 + corrected_work / (self.gas.cp * T_REF)
         if np.any(tau <= 0.0):
             raise ValueError(f"{self.name}: densification produced a non-physical τ")
+
+        # Re-derive with the machine's own convention, and carry `kind` through.
+        # Both matter: a densified turbine that inherited the compressor forms
+        # would silently become a compressor again one call after the loader
+        # took care to decide otherwise.
+        k = self.gas.gm1_over_g
+        if self.kind == "turbine":
+            efficiency = -corrected_work / (self.gas.cp * T_REF * (1.0 - PR**-k))
+            ecmf = Wc * np.sqrt(tau) * PR
+        else:
+            efficiency = self.gas.cp * T_REF * (PR**k - 1.0) / corrected_work
+            ecmf = Wc * np.sqrt(tau) / PR
 
         return BetaMap(
             name=f"{self.name}×{factor}",
@@ -176,10 +187,12 @@ class BetaMap:
             corrected_speed=speed,
             Wc=Wc,
             PR=PR,
-            efficiency=dh0s / corrected_work,
+            efficiency=efficiency,
             corrected_work=corrected_work,
-            ecmf=Wc * np.sqrt(tau) / PR,
+            ecmf=ecmf,
             gas=self.gas,
+            kind=self.kind,
+            repaired_efficiency=self.repaired_efficiency,
         )
 
     # -- evaluation ---------------------------------------------------------
@@ -445,14 +458,36 @@ class ECMFMap:
 
     name: str
     corrected_speed: np.ndarray  # (n_speed,)
-    ecmf: np.ndarray  # (n_key, n_speed), ascending down each column
+    key: np.ndarray  # (n_key, n_speed), ascending down each column
     PR: np.ndarray
     corrected_work: np.ndarray
     efficiency: np.ndarray
     gas: PerfectGas
+    #: Which quantity :attr:`key` holds — ``"ecmf"`` for a compressor, ``"PR"``
+    #: for a turbine. ECMF is monotonic in β on 135 of 135 compressor lines but
+    #: only 17 of 64 turbine lines, where ``PR`` manages **64 of 64**, so the
+    #: two machines want different keys and neither choice generalises.
+    key_field: str = "ecmf"
+    #: Corrected flow, tabulated rather than derived when ``PR`` is the key.
+    #: ``None`` on an ECMF-keyed map, where ``Wc`` follows from the key exactly.
+    Wc: np.ndarray | None = None
     #: Count of lookups whose key fell outside the tabulated range, in a
     #: one-element array so a frozen dataclass can still keep the tally.
     off_table: np.ndarray = field(default_factory=lambda: np.zeros(1, dtype=np.int64))
+
+    @property
+    def ecmf(self) -> np.ndarray:
+        """The key array, when the key *is* ECMF.
+
+        Raises on a PR-keyed map rather than returning ``PR`` under the name
+        ``ecmf``: a wrong label on a table that still interpolates cleanly is
+        exactly the failure mode that cost §3.37 an afternoon.
+        """
+        if self.key_field != "ecmf":
+            raise AttributeError(
+                f"{self.name} is keyed on {self.key_field}, not ecmf — use .key"
+            )
+        return self.key
 
     @classmethod
     def from_beta_map(cls, m: BetaMap, n_key: int | None = None) -> ECMFMap:
@@ -470,21 +505,22 @@ class ECMFMap:
         """
         from scipy.interpolate import PchipInterpolator
 
-        n_speed = m.ecmf.shape[1]
+        n_speed = m.PR.shape[1]
         if n_key is not None and n_key < 2:
             raise ValueError(f"n_key must be at least 2, got {n_key}")
+        key_field = "PR" if m.kind == "turbine" else "ecmf"
+        src_key = m.PR if key_field == "PR" else m.ecmf
         bad = [
             float(m.corrected_speed[j])
             for j in range(n_speed)
             if not (
-                np.all(np.diff(m.ecmf[:, j]) > 0.0) or np.all(np.diff(m.ecmf[:, j]) < 0.0)
+                np.all(np.diff(src_key[:, j]) > 0.0) or np.all(np.diff(src_key[:, j]) < 0.0)
             )
         ]
         if bad:
             raise ValueError(
-                f"{m.name}: ECMF is not monotonic in beta at Nc={bad[:4]}"
-                f"{' ...' if len(bad) > 4 else ''}, so it cannot key the map. "
-                f"Turbines are the usual case — key those on PR instead"
+                f"{m.name}: {key_field} is not monotonic in beta at Nc={bad[:4]}"
+                f"{' ...' if len(bad) > 4 else ''}, so it cannot key the map"
             )
 
         # Column-major, because every lookup slices a *column*: `evaluate` reads
@@ -495,33 +531,42 @@ class ECMFMap:
         # contiguous view: 7.42 µs to 1.69 µs at 1009×649, and the cost stops
         # growing with densification, which is what made `densify` 72 look
         # unaffordable when it is not.
-        rows = n_key or m.ecmf.shape[0]
+        rows = n_key or src_key.shape[0]
         key = np.empty((rows, n_speed), order="F")
         pr = np.empty((rows, n_speed), order="F")
         cw = np.empty((rows, n_speed), order="F")
         eff = np.empty((rows, n_speed), order="F")
+        # Wc is carried only for a PR-keyed map. On an ECMF-keyed one it follows
+        # from the key exactly -- `Wc = ECMF·PR/√τ` -- and deriving it is what
+        # makes the returned point reproduce the key it was asked for to 2e-16,
+        # which interpolating a fourth column would quietly give up.
+        wc = np.empty((rows, n_speed), order="F") if key_field == "PR" else None
+        cols = [(pr, m.PR), (cw, m.corrected_work), (eff, m.efficiency)]
+        if wc is not None:
+            cols.append((wc, m.Wc))
         for j in range(n_speed):
-            e = m.ecmf[:, j]
+            e = src_key[:, j]
             order = np.argsort(e)
             e_s = e[order]
             if n_key is None:
                 key[:, j] = e_s
-                pr[:, j] = m.PR[:, j][order]
-                cw[:, j] = m.corrected_work[:, j][order]
-                eff[:, j] = m.efficiency[:, j][order]
+                for dst, src in cols:
+                    dst[:, j] = src[:, j][order]
                 continue
             grid = np.linspace(e_s[0], e_s[-1], n_key)
             key[:, j] = grid
-            for dst, src in ((pr, m.PR), (cw, m.corrected_work), (eff, m.efficiency)):
+            for dst, src in cols:
                 dst[:, j] = PchipInterpolator(e_s, src[:, j][order])(grid)
         return cls(
-            name=f"{m.name}→ECMF",
+            name=f"{m.name}→{key_field.upper()}",
             corrected_speed=m.corrected_speed,
-            ecmf=key,
+            key=key,
             PR=pr,
             corrected_work=cw,
             efficiency=eff,
             gas=m.gas,
+            key_field=key_field,
+            Wc=wc,
         )
 
     def evaluate(self, ecmf: float, corrected_speed: float) -> MapPoint:
@@ -549,7 +594,7 @@ class ECMFMap:
             pushes the point back into the data, which is where the converged
             answer lives; the extrapolated values are transient, not the answer.
             """
-            x, y = self.ecmf[:, col], a[:, col]
+            x, y = self.key[:, col], a[:, col]
             if not extrapolate:
                 return float(np.interp(ecmf, x, y))
             # Bounded: the slope is held for one speed-line width past each end
@@ -572,7 +617,7 @@ class ECMFMap:
         # operating point pinned at the end has lost its restoring force in one
         # direction, and a run that converges anyway has converged to the edge of
         # the data rather than to an answer (`PLAN.md` §3.34).
-        if ecmf < self.ecmf[0, j] or ecmf > self.ecmf[-1, j]:
+        if ecmf < self.key[0, j] or ecmf > self.key[-1, j]:
             self.off_table[0] += 1
 
         pr = at(j, self.PR) * (1.0 - w) + at(j + 1, self.PR) * w
@@ -582,16 +627,28 @@ class ECMFMap:
         ef = (at(j, self.efficiency, extrapolate=False) * (1.0 - w)
               + at(j + 1, self.efficiency, extrapolate=False) * w)
         tau = 1.0 + cw / (self.gas.cp * T_REF)
-        lo = float(min(self.ecmf[0, j], self.ecmf[0, j + 1]))
-        hi = float(max(self.ecmf[-1, j], self.ecmf[-1, j + 1]))
+        lo = float(min(self.key[0, j], self.key[0, j + 1]))
+        hi = float(max(self.key[-1, j], self.key[-1, j + 1]))
         e = float(np.clip(ecmf, lo, hi))
+        if self.key_field == "PR":
+            # PR is the key, so it is returned exactly as asked; Wc comes from
+            # the table and ECMF follows. A turbine tabulates the expansion
+            # ratio p₀₁/p₀₂, so ECMF = Wc·√τ·PR — the reciprocal of the
+            # compressor factor, and getting it upside down is silent because
+            # both are dimensionally fine (§3.38).
+            pr = e
+            wc = at(j, self.Wc) * (1.0 - w) + at(j + 1, self.Wc) * w
+            ecmf_out = wc * math.sqrt(tau) * pr
+        else:
+            wc = e * pr / math.sqrt(tau)
+            ecmf_out = e
         return MapPoint(
             beta=math.nan,  # deliberately absent: this map has no beta
             corrected_speed=corrected_speed,
-            Wc=e * pr / math.sqrt(tau),
+            Wc=wc,
             PR=pr,
             corrected_work=cw,
-            ecmf=e,
+            ecmf=ecmf_out,
             efficiency=ef,
         )
 

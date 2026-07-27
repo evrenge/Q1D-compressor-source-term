@@ -187,3 +187,75 @@ class TestNonPositiveEfficiency:
         write_map(tmp_path / "t.xlsx", PR, Wc, eff)
         with pytest.raises(ValueError, match="no cell with eta > 0"):
             load_beta_map(tmp_path / "t.xlsx", GAS)
+
+
+class TestTurbinesAreKeyedOnPR:
+    """ECMF keys a compressor; it does not key a turbine.
+
+    Monotonic in β on 135 of 135 compressor speed lines, but only **17 of 64**
+    turbine lines — while ``PR`` is monotonic on **64 of 64**. Neither choice
+    generalises, so the key follows the machine.
+    """
+
+    def build(self, tmp_path, arrays, name="m.xlsx"):
+        from q1d.maps import ECMFMap
+
+        write_map(tmp_path / name, *arrays)
+        return ECMFMap.from_beta_map(load_beta_map(tmp_path / name, GAS).densify(3))
+
+    def test_a_turbine_keys_on_pressure_ratio(self, tmp_path):
+        e = self.build(tmp_path, turbine_arrays())
+        assert e.key_field == "PR"
+
+    def test_a_compressor_still_keys_on_ecmf(self, tmp_path):
+        e = self.build(tmp_path, compressor_arrays())
+        assert e.key_field == "ecmf"
+        assert e.Wc is None, "Wc follows from an ECMF key exactly; do not tabulate it"
+
+    def test_the_key_ascends_so_interp_can_use_it(self, tmp_path):
+        e = self.build(tmp_path, turbine_arrays())
+        assert np.all(np.diff(e.key, axis=0) > 0.0)
+
+    def test_the_point_reproduces_the_pressure_ratio_asked_for(self, tmp_path):
+        """The PR-keyed analogue of the compressor's key-reproduction property."""
+        e = self.build(tmp_path, turbine_arrays())
+        worst = 0.0
+        for j in range(len(e.corrected_speed)):
+            nc = float(e.corrected_speed[j])
+            lo, hi = float(e.key[0, j]), float(e.key[-1, j])
+            for f in (0.05, 0.5, 0.95):
+                q = lo + f * (hi - lo)
+                worst = max(worst, abs(e.evaluate(q, nc).PR / q - 1.0))
+        assert worst == 0.0, f"PR not reproduced: {worst:.3e}"
+
+    def test_ecmf_comes_back_with_the_turbine_factor(self, tmp_path):
+        e = self.build(tmp_path, turbine_arrays())
+        nc = float(e.corrected_speed[0])
+        q = float(e.key[len(e.key) // 2, 0])
+        pt = e.evaluate(q, nc)
+        tau = 1.0 + pt.corrected_work / (GAS.cp * T_REF)
+        assert pt.ecmf == pytest.approx(pt.Wc * np.sqrt(tau) * pt.PR, rel=1e-12)
+
+    def test_the_ecmf_attribute_refuses_to_alias_a_pr_key(self, tmp_path):
+        """A wrong label on a table that still interpolates cleanly is the
+        failure mode §3.37 spent an afternoon on. Loud beats convenient."""
+        e = self.build(tmp_path, turbine_arrays())
+        with pytest.raises(AttributeError, match="keyed on PR"):
+            _ = e.ecmf
+
+    def test_densify_keeps_the_machine_it_was_given(self, tmp_path):
+        """A densified turbine that reverted to compressor forms would undo the
+        loader's decision one call later, and silently."""
+        write_map(tmp_path / "t.xlsx", *turbine_arrays())
+        m = load_beta_map(tmp_path / "t.xlsx", GAS)
+        d = m.densify(4)
+        assert d.kind == "turbine"
+        assert np.all(d.corrected_work < 0.0)
+        tau = 1.0 + d.corrected_work / (GAS.cp * T_REF)
+        assert d.ecmf == pytest.approx(d.Wc * np.sqrt(tau) * d.PR, rel=1e-12)
+        # η is *re-derived* from the refined PR and work, never interpolated
+        # (it has a pole on `TranssonicCompressor`, §3.6). So it is exact on the
+        # supplied β nodes and only close between them — assert both, rather
+        # than pick a tolerance loose enough to hide the first.
+        assert d.efficiency[::4] == pytest.approx(0.9, rel=1e-12), "exact on the nodes"
+        assert d.efficiency == pytest.approx(0.9, abs=1e-2), "close between them"
