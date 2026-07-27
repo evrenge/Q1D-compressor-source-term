@@ -1189,6 +1189,104 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.29 What is left is the last 3% of the flow range, and it is β with nothing to grip
+
+The full-map sweep with §3.28's closure runs every tabulated speed line of all
+four maps — including the 13 the inverse refuses — at seven positions each,
+β = 0 and β = 1 among them. The failures that remain are not scattered. They sit
+in one place, and the place identifies the mechanism.
+
+**Every failure is in the last 3% of the `Wc` range.**
+
+| case | position in `Wc` range | PR | outcome |
+| --- | --- | --- | --- |
+| `TranssonicCompressor` Nc 0.880 f = 0.85 | 1.000 | 1.538 | fails |
+| `TranssonicCompressor` Nc 0.880 f = 0.65 | 0.996 | 1.690 | fails |
+| `TranssonicCompressor` Nc 0.791 f = 0.85 | 0.995 | 1.378 | fails |
+| `HighPqPCompr` Nc 0.750 f = 0.85 | 0.993 | 4.128 | fails |
+| `TwoStgRadialCompr` Nc 0.600 f = 0.85 | 0.992 | 1.978 | fails |
+| `HighPqPCompr` Nc 0.700 f = 0.85 | 0.990 | 3.361 | fails |
+| `HighPqPCompr` Nc 0.750 f = 0.65 | 0.972 | 4.516 | fails |
+| `SubsonicCompressor` Nc 1.000 f = 0.85 | 0.961 | 1.934 | **holds** |
+| `HighPqPCompr` Nc 0.700 f = 0.50 | 0.907 | 3.954 | **holds** |
+
+§3.19 recorded the same weakness as "the last ~25% of the `Wc` range toward
+choke". It is now the last **3%** — an eightfold widening of the usable range,
+and the boundary is sharp rather than gradual.
+
+**The β = 1 column holds, and that is the diagnosis.** At *exactly* the choke end
+the point holds on every map — `HighPqPCompr` PR 3.149, `TwoStgRadialCompr`
+PR 1.759, `TranssonicCompressor` PR 1.441. The same duct, the same pressure
+ratio, the same mesh, 0.5% away in flow, fails. The only difference is that at
+the end of the line β is pinned by the clamp and has no freedom, and 0.5% inside
+it does.
+
+So the remaining failure is in the β dynamics, not in the flow solver, not in the
+similarity scaling, and not in the pressure ratio. Nothing about the Euler side
+of the problem changes across that boundary.
+
+**And it is the physics of §3.26, arriving from the other side.** That section's
+own physical statement is that on a choked line the inlet state carries no
+information about position along it. In the residual formulation that reads
+`∂Wc_map/∂β → 0`: the residual barely responds to β, so β is nearly *unconstrained*
+rather than wrongly constrained. The closure is not computing the wrong answer
+there; it is being asked to determine a quantity the measurement cannot pin down.
+That is why clamping at the end of the line — removing the freedom entirely —
+is the configuration that works.
+
+**Two hypotheses tested and refuted, both by measurement.**
+
+*The step is too small.* On `HighPqPCompr` Nc 0.700 f = 0.85 the step-to-step
+difference quotient gives `∂R/∂β = 0.091` against the map slope's 0.60, so the
+Newton step looked 6.6× too conservative. Replacing the map slope with that
+measured secant made it **13× worse** — W error from −1.90e−02 to +2.42e−01, and
+clamps from 36 846 to 51 165, reproduced twice. The reason is that a one-timestep
+difference quotient measures the *frozen-flow* sensitivity, before the duct has
+responded; that is smaller than the settled sensitivity, so using it as a Newton
+denominator systematically over-steps. `c = 1` is a better estimate of the
+*steady* duct constant than the instantaneous measurement is. The secant is kept
+behind `secant=False` as a recorded negative result.
+
+*The step rate is wrong.* Neither direction helps, which is what rules out
+tuning altogether. On the same case:
+
+| β rate | W error | clamps |
+| --- | --- | --- |
+| `gain` 0.3 — slower | +1.736e−01 | 53 095 |
+| **`gain` 1.0** | **−1.896e−02** | **36 846** |
+| secant, ≈6.6× faster | +2.423e−01 | 51 165 |
+
+The default sits near a local optimum and both neighbours are an order of
+magnitude worse. A step-size problem has a step size that fixes it; this does
+not, because there is no isolated root to step toward.
+
+*The trace shows a growing oscillation.* It does not. A 2000-step trace of the
+same case looked like one; per-step output shows a well-formed update reducing
+`R` monotonically, `−1.396e−02 → −6.5e−03` over 39 steps. The coarse samples were
+aliasing a slow drift. Recorded because the wrong reading survived two rounds of
+reasoning before the finer measurement killed it.
+
+
+**What would actually close it: the back pressure.** One piece of genuinely
+independent information is available near choke and is not being used. `p_back`
+is a *boundary condition*, not the disk's output, and together with the
+upstream-measured `W` it fixes the total pressure the system demands at the disk
+exit — computable without reference to anything the source injected. Then
+
+```
+PR_map(β) = PR_demanded(W, p_back)
+```
+
+is well posed exactly where `Wc_map(β)` degenerates, because PR is the quantity
+that varies along a choked line. This is *not* §3.9's circular closure: that one
+read the field downstream of the disk, which is the source's own output, and is
+degenerate for the reason §3.28 gives. Reading a boundary condition closes no
+loop.
+
+The cost is interface, not physics: a component would need to know its
+downstream network, which is what component matching is, and which the engine
+work will need anyway. Not built — recorded as the indicated direction.
+
 ### 3.28 β as a relaxation on the residual — the map's inverse was never needed
 
 §3.26 left the closure blocked: keying on inlet `Wc` refuses 13 of 45 tabulated
