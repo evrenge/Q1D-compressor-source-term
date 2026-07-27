@@ -33,7 +33,7 @@ import numpy as np
 
 from .gas import PerfectGas
 
-__all__ = ["BetaMap", "MapPoint", "ScaledMap", "load_beta_map"]
+__all__ = ["BetaMap", "ECMFMap", "MapPoint", "ScaledMap", "load_beta_map"]
 
 #: Standard-day reference used by the corrected parameters in these maps.
 T_REF = 288.15
@@ -378,6 +378,127 @@ class ScaledMap:
 
     def inlet_closure_is_invertible(self, corrected_speed: float) -> bool:
         return self.inner.inlet_closure_is_invertible(corrected_speed)
+
+
+@dataclass(frozen=True)
+class ECMFMap:
+    """A map keyed on **ECMF**, with β eliminated at build time.
+
+    β exists only because a speed line is multivalued in inlet ``Wc``. ECMF is
+    monotonic in β on **135 of 135** speed lines across all twelve supplied
+    compressor and fan maps, so `β ↔ ECMF` is a bijection along every line and
+    ``PR(ECMF, Nc)`` and ``Δh₀(ECMF, Nc)`` are single-valued. β therefore carries
+    no information the key does not, and belongs in the loader rather than in the
+    runtime.
+
+    **The order matters and is not negotiable.** Densify in ``(β, Nc)`` *first*,
+    convert *after* (D13). β is the correspondence label — β = 0.5 on the 80% and
+    90% lines are the same relative position — so crossing speeds at fixed β
+    follows the map's own grid, at 1.79% against 2.81% for crossing at fixed
+    ECMF. Converting before densifying would pay that 1.6×; converting after
+    costs nothing, because the runtime blend then happens between speed lines
+    already 9× closer together and the error goes with the square of the gap.
+
+    **It also removes an inconsistency the β path has.** :meth:`BetaMap.evaluate_at_ecmf`
+    inverts a *precomputed* ECMF array while the caller forms ECMF from
+    separately interpolated ``Wc``, ``PR`` and ``τ``; between nodes those
+    disagree at O(Δβ²). Measured through the solver on ``HighPqPCompr`` Nc 0.700
+    that is 5.54e−06, 1.57e−06 and 2.69e−07 at densify 9, 18 and 36 — order 2.18,
+    and on ``SubsonicCompressor`` it passes through zero, so it is a convergent
+    error rather than a bias. Keyed on ECMF the question does not arise: the
+    table is evaluated *at* the measured key.
+
+    Turbines are excluded on purpose. ECMF is monotonic on only 7 of 22 turbine
+    speed lines, while ``PR`` is monotonic on **22 of 22** — a turbine wants its
+    own key, and :meth:`BetaMap` still serves it.
+    """
+
+    name: str
+    corrected_speed: np.ndarray  # (n_speed,)
+    ecmf: np.ndarray  # (n_key, n_speed), ascending down each column
+    PR: np.ndarray
+    corrected_work: np.ndarray
+    efficiency: np.ndarray
+    gas: PerfectGas
+
+    @classmethod
+    def from_beta_map(cls, m: BetaMap, n_key: int | None = None) -> ECMFMap:
+        """Re-tabulate onto ECMF. ``m`` should already be densified (D13)."""
+        from scipy.interpolate import PchipInterpolator
+
+        n_beta, n_speed = m.ecmf.shape
+        n_key = n_key or n_beta
+        if n_key < 2:
+            raise ValueError(f"n_key must be at least 2, got {n_key}")
+        bad = [
+            float(m.corrected_speed[j])
+            for j in range(n_speed)
+            if not (
+                np.all(np.diff(m.ecmf[:, j]) > 0.0) or np.all(np.diff(m.ecmf[:, j]) < 0.0)
+            )
+        ]
+        if bad:
+            raise ValueError(
+                f"{m.name}: ECMF is not monotonic in beta at Nc={bad[:4]}"
+                f"{' ...' if len(bad) > 4 else ''}, so it cannot key the map. "
+                f"Turbines are the usual case — key those on PR instead"
+            )
+
+        key = np.empty((n_key, n_speed))
+        pr = np.empty((n_key, n_speed))
+        cw = np.empty((n_key, n_speed))
+        eff = np.empty((n_key, n_speed))
+        for j in range(n_speed):
+            e = m.ecmf[:, j]
+            order = np.argsort(e)
+            e_s = e[order]
+            grid = np.linspace(e_s[0], e_s[-1], n_key)
+            key[:, j] = grid
+            for dst, src in ((pr, m.PR), (cw, m.corrected_work), (eff, m.efficiency)):
+                dst[:, j] = PchipInterpolator(e_s, src[:, j][order])(grid)
+        return cls(
+            name=f"{m.name}→ECMF",
+            corrected_speed=m.corrected_speed,
+            ecmf=key,
+            PR=pr,
+            corrected_work=cw,
+            efficiency=eff,
+            gas=m.gas,
+        )
+
+    def evaluate(self, ecmf: float, corrected_speed: float) -> MapPoint:
+        """``PR`` and corrected work at a measured ECMF. No β anywhere."""
+        n = self.corrected_speed
+        if corrected_speed <= n[0]:
+            j, w = 0, 0.0
+        elif corrected_speed >= n[-1]:
+            j, w = len(n) - 2, 1.0
+        else:
+            j = int(np.searchsorted(n, corrected_speed) - 1)
+            w = (corrected_speed - n[j]) / (n[j + 1] - n[j])
+
+        def at(col: int, a: np.ndarray) -> float:
+            # Clamp rather than extrapolate: off the end of a speed line is not
+            # a meaningful operating point, and 3.8 measured extrapolation as the
+            # worst error source on these maps.
+            return float(np.interp(ecmf, self.ecmf[:, col], a[:, col]))
+
+        pr = at(j, self.PR) * (1.0 - w) + at(j + 1, self.PR) * w
+        cw = at(j, self.corrected_work) * (1.0 - w) + at(j + 1, self.corrected_work) * w
+        ef = at(j, self.efficiency) * (1.0 - w) + at(j + 1, self.efficiency) * w
+        tau = 1.0 + cw / (self.gas.cp * T_REF)
+        lo = float(min(self.ecmf[0, j], self.ecmf[0, j + 1]))
+        hi = float(max(self.ecmf[-1, j], self.ecmf[-1, j + 1]))
+        e = float(np.clip(ecmf, lo, hi))
+        return MapPoint(
+            beta=math.nan,  # deliberately absent: this map has no beta
+            corrected_speed=corrected_speed,
+            Wc=e * pr / math.sqrt(tau),
+            PR=pr,
+            corrected_work=cw,
+            ecmf=e,
+            efficiency=ef,
+        )
 
 
 def load_beta_map(path: str | Path, gas: PerfectGas, name: str | None = None) -> BetaMap:
