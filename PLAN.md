@@ -1391,12 +1391,50 @@ annulus line is actually drawn — gives at 601 cells:
 distribution.** A corner in the wall line is cheap to draw and expensive to
 compute next to a source term.
 
-**Status.** Single tapered stage: −2.7e−06 and converged. Trains of 4, 8 and 12
-stages improve with the smooth annulus (OPR 4: −6.2e−04 → +9.5e−05) but their
-peak-to-peak is still comparable to their mean at 30,000 steps, so they are not
-converged and **must not be reported as held**. A 12-stage train took ~50,000
-steps to settle in the earlier trace; the convergence run is what decides whether
-staged OPR 30 meets the 1e−6 gate.
+**Correction: every staged number above is measured with the wrong instrument.**
+All of them are quoted off `disks[0].last.W`, which is `ρ·u·a_cell` at the
+sampling cell — a **cell-centred** product. The quantity the scheme conserves is
+the **face flux**, and the two are not the same in a duct with an area gradient.
+The 12-stage trace gives the tell for free: it plateaus at `W₁` = +9.03e−05 while
+`W_last` = +3.00e−05, and at a steady state the mass flow is identical at every
+station, so a threefold difference between two of them cannot be a mass-flow
+error at all.
+
+Measured directly, on a contracting duct with **no source**, comparing the spread
+of cell-centred `ρuA` across the duct:
+
+| `A₁/A₀` | 301 cells | 601 cells | order |
+| --- | --- | --- | --- |
+| 1.000 | **7.68e−15** | **9.60e−15** | exact |
+| 0.900 | 4.69e−06 | 1.19e−06 | 2 |
+| 0.788 | 1.07e−05 | 2.72e−06 | 2 |
+
+In **constant area the two agree to machine precision**; a contraction separates
+them by an O(Δx²) amount that grows with the area gradient. Twelve contractions
+down to `A/A₀` = 0.057 therefore explain a ~6e−05 spread between stations
+without any physical error being present.
+
+Consequences, in order of importance:
+
+* **Nothing in §3.16–§3.20 is affected.** Every one of those measurements is in a
+  constant-area duct, which is the 7.68e−15 row. The single-node PR 5.040 hold at
+  8.58e−12 stands.
+* **The staged figures need remeasuring** against the conserved flux, and until
+  they are, staged accuracy is *unknown* rather than poor.
+* **It is not only a diagnostic problem.** The disk's map lookup keys on the
+  sampled `W`, so in a gradient region the *operating point itself* is displaced
+  — invisibly here only because the staged rig uses a constant-PR map, where
+  `PR` and `Δh₀` do not depend on `Wc`. With a real map it would bite.
+* **The sampling station must sit inside the disk's constant-area flat.** Phase 3
+  chose `sample_offset = 12` by measuring the upstream numerical boundary layer
+  in a *constant-area* duct, where this effect is identically zero, so that
+  choice does not transfer. In the rig above the flat is 7 cells wide and the
+  station is 12 cells upstream — that is, in the taper. That also invalidates the
+  earlier pad = 3/10/25 test, which was reading the biased sample.
+
+**Status.** Staged accuracy: **not established**. The trains survive and settle,
+which the old injection did not, but the number that would say how well is not
+yet measured correctly.
 
 ### 3.4 Measured cost of the alternatives
 
