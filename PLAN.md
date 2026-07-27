@@ -1189,7 +1189,126 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.30 Key on ECMF, read it one step behind — and most of §3.26–§3.29 was wrong
+
+Two observations from review, neither of which I had tested:
+
+> "Since we are modelling a Quasi 1D solver with mesh, don't we have access to
+> the exit flow rate directly? … maybe we can read from one prior timestep. This
+> will introduce a lag but since the simulation is transient and our timesteps
+> are not that large, we should be able to model it pretty accurately."
+
+> "The choked lines are not choked in ECMF maps. That's why I tell you to use
+> them. And especially if you take the information from one time step prior, the
+> loop also doesn't materialize."
+
+Both are right, and together they retire the problem §3.9 opened and §3.26–§3.29
+failed to close.
+
+**Why §3.9's objection does not apply across a step.** §3.9 rejected exit-ECMF
+keying because the source would read its own output, with measured loop gain
+`−dlnPR/dlnECMF` of 0.90–1.10 — above one, where no relaxation converges. That
+loop exists *within* a step. Reading the field at the **start** of the step uses a
+value produced by the previous step's operating point: there is no algebraic loop
+to have a gain.
+
+**And my degeneracy proof was about a different object.** §3.28 argues that
+keying on the exit is degenerate because `p₀₂ = PR(β)·p₀₁` identically, so the
+residual is identically zero. That is true of ECMF *reconstructed* from the map,
+which is the disk agreeing with itself. ECMF *measured from the field* is the
+duct's actual response; the two coincide only at the fixed point, and the cells
+that fail do not fail at the fixed point — they fail on the way to it.
+
+**Measured, converged mass-flow error, single disk, 201 cells:**
+
+| case | inlet `Wc` (§3.28) | ECMF at t−1 |
+| --- | --- | --- |
+| `TranssonicCompressor` Nc 1.144 f 0.50 | *no inverse exists* | **+9.43e−08** |
+| `TranssonicCompressor` Nc 1.000 f 0.50 | −1.497e−01, 17 825 clamps | **+1.40e−07** |
+| `HighPqPCompr` Nc 0.700 f 0.85 | −1.896e−02, 36 846 clamps | **+2.69e−07** |
+| `SubsonicCompressor` Nc 1.200 f 0.50 | +1.760e−02 | **+5.40e−08** |
+| `SubsonicCompressor` Nc 1.000 f 0.15 | −1.76e−11 | −8.39e−08 |
+| `SubsonicCompressor` Nc 1.000 f 0.50 | +6.72e−12 | +4.00e−07 |
+
+Nc 1.144 is the line §3.26 built its whole argument on — `Wc` spans 9.97e−03
+across the entire β range while `PR` spans 4.94e−01. It now holds to 9.4e−08.
+**Zero clamped steps everywhere**, against tens of thousands.
+
+**The relaxation was never needed.** With the read at t−1, a plain lookup
+`β = ECMF_map⁻¹(ECMF(t−1))` gives *bit-identical* answers to the relaxed form on
+every case — +5.538e−06 and +1.342e−06 to four figures, same β to 1e−07. The
+relaxation converges 1.8–3× faster and is therefore an accelerator, not a
+stabiliser, which is the opposite of why §3.28 built it. `gain`, `tau`, the
+Newton step, the secant and the clamp logic are all machinery for a problem the
+t−1 read removes.
+
+**Station placement is a delay limit, not a bias.** `exit_offset` 1, 2 and 3 give
+identical answers to five digits; 4 and 8 do not converge, with clamping
+appearing at 8. Transport from disk to station enters the t−1 path, and beyond
+~3 cells it destabilises the loop. Offset 1 reads the disk's own exit face.
+
+**The residual is the map's β resolution, and it converges.** 5.54e−06, 1.57e−06
+and 2.69e−07 at `densify` 9, 18 and 36 — observed order **2.18**, and on
+`SubsonicCompressor` the error passes through zero, so it is a convergent
+discretisation rather than a bias. It is invariant to flow mesh (201/401/801
+identical to five digits), station offset, smear width, and β dynamics. I
+reported it as a property of exit keying; it is not.
+
+**β leaves the runtime.** ECMF is monotonic in β on **135 of 135** speed lines
+across all twelve supplied compressor and fan maps, so `β ↔ ECMF` is a bijection
+and `PR(ECMF, Nc)` is single-valued. `ECMFMap` re-tabulates at build time and
+`EcmfCompressor` does one table read per step with no operating-point state at
+all. The order matters: densify in `(β, Nc)` **first**, convert after (D13).
+
+That is not free, and the cost is between speed lines, where fixed-β crossing is
+no longer available:
+
+| worst, mid-interval | Sub ×9 | Sub ×36 | Trans ×9 | Trans ×36 |
+| --- | --- | --- | --- | --- |
+| `PR` | 4.42e−05 | 2.80e−06 | 1.20e−04 | 7.53e−06 |
+| `CW` | 2.60e−04 | 1.84e−05 | 2.13e−03 | 1.50e−04 |
+
+~15× for a 4× refinement, so second order, worst at the lowest speeds where the
+supplied lines are furthest apart. On a tabulated line the two paths are the same
+map exactly.
+
+**Turbines want a different key.** ECMF is monotonic on only **7 of 22** turbine
+speed lines, while `PR` is monotonic on **22 of 22**. `SingleStgTurbine` has a
+`Wc` span of 7.6–9.6% across its whole β range — §3.26's rank deficiency in a
+different component — with `Wc` monotonic on 0/5 lines and `PR` on 5/5. So
+`ECMFMap` refuses a turbine at build time with the reason, and turbines get their
+own key. Untested question: compressor ECMF contains `W`, which is measured
+independently of the source, whereas a turbine keyed on pure `PR` has no
+independently measured component. Whether the t−1 read carries it there is
+measurable and should be measured, not predicted.
+
+**What this supersedes.**
+
+* §3.26's conclusion — "the operating point must be either downstream-informed or
+  a dynamical state" — is half right. Downstream-informed, yes. A dynamical
+  state, no.
+* §3.28's degeneracy argument holds only for reconstructed ECMF, and its
+  ECMF-slope scaling, secant and clamping are all unnecessary.
+* §3.29 is wrong twice. Its stated mechanism — that the grip on β is
+  `∂Wc_map/∂β`, so a flat line has no isolated root — drops the dominant term:
+  `dR/dβ ∝ ∂W_duct/∂β − ∂W_map/∂β`, and the first term is large precisely because
+  `PR` varies strongly, which is the same fact that makes ECMF well conditioned.
+  The root exists and is well posed on a vertical line. Its span correlation is
+  real but the mechanism attached to it is not.
+
+**Open.** `HighPqPCompr` Nc 0.925 f 0.50 (PR ≈ 13) dies at step 964, and
+`TwoStgRadialCompr` Nc 0.600 f 0.85 settles at 2.12e−06, just outside the gate.
+Both are lines the inverse could not run at all, so neither is a regression — but
+neither is finished either. The full four-map sweep with this closure has not
+been run; the numbers above are eight cells, not 315.
+
 ### 3.29 What is left is the flat speed lines — the same rank deficiency, weakened
+
+> **Superseded by §3.30, and its mechanism is wrong.** The span correlation
+> measured here is real, but the explanation attached to it is not: `dR/dβ` is
+> proportional to `∂W_duct/∂β − ∂W_map/∂β` and this section counts only the
+> second term. The first is large, so the root exists and is well posed even on a
+> vertical line. Keying on ECMF one step behind holds every case below.
 
 The full-map sweep with §3.28's closure runs every tabulated speed line of all
 four maps — including the 13 the inverse refuses — at seven positions each,
@@ -1319,6 +1438,12 @@ work will need anyway. Not built — recorded as the indicated direction.
 
 ### 3.28 β as a relaxation on the residual — the map's inverse was never needed
 
+> **Superseded by §3.30.** The central move — stop inverting — was right. The
+> degeneracy argument against exit keying applies only to ECMF *reconstructed*
+> from `PR(β)`, not to ECMF measured from the field one step behind, and the
+> ECMF-slope scaling, the secant and the clamping are all machinery for a
+> problem that read removes.
+
 §3.26 left the closure blocked: keying on inlet `Wc` refuses 13 of 45 tabulated
 speed lines because on a choked line the whole β range compresses into ~1% of
 `Wc`. Both replacements proposed there turned out to be wrong, and the fix is
@@ -1434,6 +1559,11 @@ boundary is a measured one. Comparing them is a physics validation the project
 has never had, and it is nearly free given both pieces exist.
 
 ### 3.26 Inlet-Wc keying is not ill-conditioned near choke, it is rank-deficient
+
+> **Diagnosis correct, conclusion half wrong — see §3.30.** Inlet `Wc` really is
+> rank-deficient on 13 of 45 speed lines. But "the operating point must be either
+> downstream-informed or a dynamical state" is only half right: downstream-
+> informed yes, a dynamical state no.
 
 The full-map sweep answers a question that had been carried on assertion. Keying
 the closure on **inlet** corrected flow refuses **29% of the tabulated speed
@@ -2665,11 +2795,13 @@ D10.
 > Nc 0.900, single disk (§3.27). §3.19's near-choke limit cycle and its Nc ≥ 1.0
 > startup deaths were **re-measured and are gone** (§3.25).
 >
-> **The closure limit is resolved too.** §3.26 recorded that inlet-`Wc` keying
-> refuses 29% of the tabulated speed lines. §3.28 replaces the inversion with a
-> relaxation on the residual, which needs no inverse and works on a vertical
-> line. Wherever this document says a speed line "cannot be closed on", read it
-> as a property of `InletFlowCompressor`, not of the solver.
+> **The closure limit is resolved too — see §3.30.** §3.26 recorded that
+> inlet-`Wc` keying refuses 29% of the tabulated speed lines. The answer is to
+> key on **ECMF read one step behind**: no inverse, no operating-point state, and
+> §3.9's loop-gain objection does not apply across a step. `TranssonicCompressor`
+> Nc 1.144 — the canonical rank-deficient line, `Wc` spanning 9.97e−03 — holds to
+> **9.4e−08**. Wherever this document says a speed line "cannot be closed on",
+> read it as a property of `InletFlowCompressor`, not of the solver.
 
 - ~~**Fixed to PR 2.0, not beyond.**~~ **Superseded by §3.18.** The inlet lag on
   `(T₀₁, p₀₁, W)` (§3.12, §3.13) holds the operating point to ~2e-10 up to
