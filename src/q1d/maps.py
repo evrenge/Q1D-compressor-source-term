@@ -399,14 +399,20 @@ class ECMFMap:
     costs nothing, because the runtime blend then happens between speed lines
     already 9× closer together and the error goes with the square of the gap.
 
-    **It also removes an inconsistency the β path has.** :meth:`BetaMap.evaluate_at_ecmf`
-    inverts a *precomputed* ECMF array while the caller forms ECMF from
-    separately interpolated ``Wc``, ``PR`` and ``τ``; between nodes those
-    disagree at O(Δβ²). Measured through the solver on ``HighPqPCompr`` Nc 0.700
-    that is 5.54e−06, 1.57e−06 and 2.69e−07 at densify 9, 18 and 36 — order 2.18,
-    and on ``SubsonicCompressor`` it passes through zero, so it is a convergent
-    error rather than a bias. Keyed on ECMF the question does not arise: the
-    table is evaluated *at* the measured key.
+    **This is an exact refactor, not an accuracy fix — do not conflate them.**
+    With the native nodes kept, ``PR`` and corrected work agree with
+    :meth:`BetaMap.evaluate_at_ecmf` to 0.0 and 2.2e−16: inverting a piecewise
+    linear ECMF onto β and then interpolating a piecewise linear ``PR`` in β is
+    *the same map* as interpolating ``PR`` against ECMF directly, on shared
+    nodes. Nothing about the answer changes; β leaves the runtime, and that is
+    the whole benefit.
+
+    The separate, real residual is the map's β **resolution**. Measured end to
+    end on ``HighPqPCompr`` Nc 0.700 f 0.85, converged mass flow is off by
+    5.54e−06, 1.57e−06 and 2.69e−07 at ``densify`` 9, 18 and 36 — observed order
+    2.18, and on ``SubsonicCompressor`` the error passes through zero, so it is a
+    convergent discretisation of the map rather than a bias. Densify accordingly;
+    re-keying does not help it and was never going to.
 
     Turbines are excluded on purpose. ECMF is monotonic on only 7 of 22 turbine
     speed lines, while ``PR`` is monotonic on **22 of 22** — a turbine wants its
@@ -423,12 +429,22 @@ class ECMFMap:
 
     @classmethod
     def from_beta_map(cls, m: BetaMap, n_key: int | None = None) -> ECMFMap:
-        """Re-tabulate onto ECMF. ``m`` should already be densified (D13)."""
+        """Re-tabulate onto ECMF. ``m`` should already be densified (D13).
+
+        By default the **native** ECMF values at the β nodes are kept, merely
+        sorted — no resampling. That matters: the node values are the map's own
+        numbers, so the table is exact where the map is, and the only change from
+        the β path is that ``PR`` is now interpolated against ``ECMF`` instead of
+        against β. Resampling onto a uniform grid instead costs 3e−06 in ``PR``
+        and 3.6e−05 in corrected work, which is the same size as the
+        inconsistency this class exists to remove — measured end to end, it
+        pushed two cells that held with the β path back out of the gate. Pass
+        ``n_key`` only if a uniform key axis is worth that.
+        """
         from scipy.interpolate import PchipInterpolator
 
-        n_beta, n_speed = m.ecmf.shape
-        n_key = n_key or n_beta
-        if n_key < 2:
+        n_speed = m.ecmf.shape[1]
+        if n_key is not None and n_key < 2:
             raise ValueError(f"n_key must be at least 2, got {n_key}")
         bad = [
             float(m.corrected_speed[j])
@@ -444,14 +460,21 @@ class ECMFMap:
                 f"Turbines are the usual case — key those on PR instead"
             )
 
-        key = np.empty((n_key, n_speed))
-        pr = np.empty((n_key, n_speed))
-        cw = np.empty((n_key, n_speed))
-        eff = np.empty((n_key, n_speed))
+        rows = n_key or m.ecmf.shape[0]
+        key = np.empty((rows, n_speed))
+        pr = np.empty((rows, n_speed))
+        cw = np.empty((rows, n_speed))
+        eff = np.empty((rows, n_speed))
         for j in range(n_speed):
             e = m.ecmf[:, j]
             order = np.argsort(e)
             e_s = e[order]
+            if n_key is None:
+                key[:, j] = e_s
+                pr[:, j] = m.PR[:, j][order]
+                cw[:, j] = m.corrected_work[:, j][order]
+                eff[:, j] = m.efficiency[:, j][order]
+                continue
             grid = np.linspace(e_s[0], e_s[-1], n_key)
             key[:, j] = grid
             for dst, src in ((pr, m.PR), (cw, m.corrected_work), (eff, m.efficiency)):

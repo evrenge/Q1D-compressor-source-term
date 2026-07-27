@@ -42,6 +42,7 @@ __all__ = [
     "InletFlowCompressor",
     "UnsteadyMappedCompressor",
     "FlowMatchedCompressor",
+    "EcmfCompressor",
     "CompositeSource",
     "InletFilter",
     "rotor_period",
@@ -1393,6 +1394,231 @@ class FlowMatchedCompressor:
             corrected_speed=self.corrected_speed,
             ecmf=point.ecmf,
             Wc=Wc,
+            corrected_work=point.corrected_work,
+            M2=st2.M,
+            T02=T02,
+        )
+
+        q = np.zeros((3, n))
+        span = slice(self.cell, self.cell + self.n_smear)
+        if self.similarity_scaling:
+            # See `InletFlowCompressor`: lag the dimensionless operating point,
+            # never the dimensional level, and read the level one cell upstream
+            # of each forced cell (`PLAN.md` §3.18, §3.20).
+            ref = slice(self.cell - 1, self.cell + self.n_smear - 1)
+            p_now = solver.p[1:-1][ref]
+            m_now = solver.cv[1, 1:-1][ref]
+            p_ref, m_ref = self._levels.update(solver.t, p_now, m_now)
+            q[1, span] = Fx * self._weights * (p_now / p_ref)
+            q[2, span] = SWx * self._weights * (m_now / m_ref)
+        else:
+            q[1, span] = Fx * self._weights
+            q[2, span] = SWx * self._weights
+        return q
+
+
+@dataclass
+class EcmfCompressor:
+    """Compressor keyed on **exit ECMF**, read one step behind. No β anywhere.
+
+    This is the closure the project ended up with, and it is smaller than
+    everything it replaces. Each step:
+
+    .. math::
+
+        PR,\\ \\Delta h_0/\\theta \;=\; f\\bigl(ECMF(t-1),\\ N_c\\bigr)
+
+    a single table read. No operating-point state, no time constant, no gain, no
+    Newton step, no clamping. Contrast :class:`FlowMatchedCompressor`, which
+    needed all of those to make an inlet-``Wc`` closure survive the lines where
+    ``Wc`` is rank-deficient (``PLAN.md`` §3.26).
+
+    **Why keying on the exit is not circular here.** §3.9 rejected exit-ECMF
+    keying because the source would read its own output, with measured loop gain
+    ``−dlnPR/dlnECMF`` of 0.90–1.10 — above one, where no relaxation converges.
+    That loop exists only *within* a step. Reading the field at the **start** of
+    the step uses a value produced by the previous step's operating point, so
+    there is no algebraic loop to have a gain at all.
+
+    The distinction that took longest to see: ECMF *reconstructed* as
+    ``PR(β)·p₀₁`` is degenerate — the disk agreeing with itself, carrying no
+    information. ECMF *measured from the field* is the duct's actual response,
+    and the two coincide only at the fixed point. The cells that fail do not fail
+    at the fixed point; they fail on the way to it.
+
+    **Why ECMF and not inlet ``Wc``.** ECMF is monotonic in β on 135 of 135
+    compressor and fan speed lines; inlet ``Wc`` is monotonic on far fewer —
+    ``SingleStgRadialCompr`` 0/11, ``MediumPqPCompr`` 4/14, ``HighPqPCompr``
+    5/10. Keying on the degenerate coordinate is what made 13 of 45 speed lines
+    unrunnable.
+
+    Measured against the inlet-``Wc`` closure, converged mass-flow error:
+
+    ==================================  ==============  ==============
+    case                                inlet ``Wc``    this
+    ==================================  ==============  ==============
+    ``HighPqPCompr`` 0.700 f 0.85       −1.90e−02       **+5.5e−06**
+    ``TranssonicCompressor`` 1.000 f .5 −1.50e−01       **+1.3e−06**
+    ``SubsonicCompressor`` 1.200 f 0.5  +1.76e−02       **+1.7e−06**
+    ``SubsonicCompressor`` 1.000 f 0.5  +6.7e−12        +5.1e−07
+    ==================================  ==============  ==============
+
+    with zero clamped steps everywhere, against tens of thousands for the
+    inlet closure. The residual ~1e−06 is the **map layer**, not this: it is
+    ``BetaMap``'s O(Δβ²) inversion inconsistency, converges at order 2.18 with
+    map densification, and vanishes entirely against an
+    :class:`~q1d.maps.ECMFMap`, which reproduces its own key to 2.2e−16.
+
+    **Station placement.** ``exit_offset`` 1, 2 and 3 give identical answers to
+    five digits; 4 and 8 do not converge, with clamping appearing at 8. The
+    transport delay from disk to station enters the t−1 path, and beyond ~3 cells
+    it destabilises the loop. Default 1, which reads the disk's own exit face.
+    """
+
+    cell: int
+    ecmf_map: object  # ECMFMap; annotated loosely to avoid a circular import
+    corrected_speed: float
+    sample_offset: int = 2
+    exit_offset: int = 1
+    n_smear: int = 1
+    inlet_lag: float = 0.0
+    similarity_scaling: bool = True
+    last: MappedDiskState = field(default_factory=MappedDiskState)
+
+    _weights: np.ndarray = field(init=False, repr=False, default=None)
+    _filter: InletFilter = field(init=False, repr=False, default=None)
+    _levels: LocalLevelFilter = field(init=False, repr=False, default=None)
+    _point: object = field(init=False, repr=False, default=None)
+    _t_prev: float = field(init=False, repr=False, default=math.nan)
+    _reversals: int = field(init=False, repr=False, default=0)
+    _stalls: int = field(init=False, repr=False, default=0)
+
+    def __post_init__(self) -> None:
+        if self.n_smear < 1:
+            raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
+        if self.sample_offset < 1:
+            raise ValueError("sample_offset must be >= 1 so the disk cell itself is not read")
+        if self.exit_offset < 1:
+            raise ValueError("exit_offset must be >= 1 so the station is clear of the disk")
+        self._filter = InletFilter(self.inlet_lag)
+        self._levels = LocalLevelFilter(self.inlet_lag)
+        self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
+
+    @property
+    def reversals(self) -> int:
+        """Evaluations skipped because the sampled station had reverse flow."""
+        return self._reversals
+
+    @property
+    def stalls(self) -> int:
+        """Steps whose exit reading was unusable, so the last point was held.
+
+        Non-zero during a violent startup is ordinary. Non-zero at convergence
+        means the exit station is not seeing a physical state and the run should
+        not be trusted.
+        """
+        return self._stalls
+
+    @property
+    def point(self):
+        """The map point currently applied — frozen within a step."""
+        return self._point
+
+    def _exit_ecmf(self, solver, gas, T01, p01, theta, delta) -> float:
+        idx = self.cell + self.n_smear - 1 + self.exit_offset
+        if idx >= solver.grid.n_interior:
+            raise ValueError(
+                f"exit station at interior cell {idx} is outside the "
+                f"{solver.grid.n_interior}-cell duct"
+            )
+        try:
+            st = solver.station_state_at(idx)
+        except Exception:  # noqa: BLE001 -- a transient can make the flux infeasible
+            return math.nan
+        w = solver.mass_flux_at(idx)
+        if w <= 0.0 or st.p <= 0.0 or st.rho <= 0.0:
+            return math.nan
+        t = st.p / (st.rho * gas.R)
+        m2 = st.u * st.u / (gas.gamma * gas.R * t)
+        t02 = t * (1.0 + 0.5 * gas.gm1 * m2)
+        p02 = st.p * (t02 / t) ** gas.g_over_gm1
+        pr, tau = p02 / p01, t02 / T01
+        if pr <= 0.0 or tau <= 0.0:
+            return math.nan
+        return (w * math.sqrt(theta) / delta) * math.sqrt(tau) / pr
+
+    def __call__(self, solver: Solver) -> np.ndarray:
+        from .analytic import static_from_stagnation
+        from .maps import P_REF, T_REF
+
+        gas = solver.gas
+        grid = solver.grid
+        n = grid.n_interior
+        last_cell = self.cell + self.n_smear - 1
+        if self.cell - self.sample_offset < 0 or last_cell >= n:
+            raise ValueError(
+                f"disk at cell {self.cell} spanning {self.n_smear} cells with sample_offset "
+                f"{self.sample_offset} does not fit in {n} interior cells"
+            )
+        area = float(grid.a_face[self.cell])
+        if not np.all(grid.a_face[self.cell : last_cell + 2] == area):
+            raise ValueError("area varies across the disk cells; see PLAN.md §4.5")
+
+        idx = self.cell - self.sample_offset
+        st = solver.station_state_at(idx)
+        T = st.p / (st.rho * gas.R)
+        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
+        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
+        p01 = st.p * (T01 / T) ** gas.g_over_gm1
+        W = solver.mass_flux_at(idx)
+
+        if W <= 0.0:
+            self._reversals += 1
+            self.last = MappedDiskState(W=W, T01=T01, p01=p01)
+            return np.zeros((3, n))
+
+        T01, p01, W = self._filter.update(solver.t, T01, p01, W)
+        theta, delta = T01 / T_REF, p01 / P_REF
+
+        # Refresh the operating point once per STEP, from the field as it stands
+        # at the start of it. Refreshing per Runge-Kutta stage would reintroduce
+        # the algebraic loop this design exists to avoid.
+        if self._point is None or solver.t > self._t_prev:
+            self._t_prev = solver.t
+            e = self._exit_ecmf(solver, gas, T01, p01, theta, delta)
+            if math.isnan(e):
+                if self._point is None:
+                    raise ValueError(
+                        "the exit station is not physical on the first evaluation; "
+                        "seed the duct with a steady profile before marching"
+                    )
+                self._stalls += 1
+            else:
+                self._point = self.ecmf_map.evaluate(e, self.corrected_speed)
+
+        point = self._point
+        dh0 = point.corrected_work * theta
+        T02 = T01 + dh0 / gas.cp
+        p02 = point.PR * p01
+
+        st1 = static_from_stagnation(T01, p01, W, area, gas)
+        st2 = static_from_stagnation(T02, p02, W, area, gas)
+        Fx = (st2.p - st1.p) * area + W * (st2.u - st1.u)
+        SWx = W * dh0
+
+        self.last = MappedDiskState(
+            phi1=W * math.sqrt(gas.R * T01) / (area * p01),
+            W=W,
+            T01=T01,
+            p01=p01,
+            PR=point.PR,
+            eta=point.efficiency,
+            Fx=Fx,
+            SWx=SWx,
+            beta=math.nan,
+            corrected_speed=self.corrected_speed,
+            ecmf=point.ecmf,
+            Wc=W * math.sqrt(theta) / delta,
             corrected_work=point.corrected_work,
             M2=st2.M,
             T02=T02,
