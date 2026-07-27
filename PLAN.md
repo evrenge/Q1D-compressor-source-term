@@ -1496,16 +1496,40 @@ between stages. The single-disk cases are `ncell` = 201 with the disk at cell 90
 For an engine with many components that ratio should invert, and the resolution
 should follow the gradients rather than the component count.
 
-**Status.** Staged OPR 30, twelve stages, tapered annulus: converged, stable,
-**+9.0e−05** as measured by the old cell-centred probe. With `mass_flux_at`, the
-6-stage case measures the mass flux as **uniform to ~1e−12 across every face** —
-so the solver conserves mass exactly and these are genuine steady states — while
-sitting ~1e−4 from the *analytic design chain*. That is a truncation question,
-not a conservation one, and the mesh sweep is what answers it.
+**The staged train converges, at better than second order.** Measured properly at
+last: OPR 5.478 in six stages, tapered annulus, `n_smear` = 1, every physical
+quantity held fixed across meshes — geometry *and* the sampling station — and
+each case run until `residual_norm` falls below 1e−11 rather than for a fixed
+number of steps.
 
-**Three confounded experiments in a row, and what they have in common.** Worth
-recording as a methodological note, because the same mistake wore three
-different costumes:
+| `ncell` | `sample_offset` | mass-flow error | flux non-uniformity | steps |
+| --- | --- | --- | --- | --- |
+| 401 | 8 | +7.230e−05 | 1.6e−09 | 28 000 |
+| 601 | 12 | +1.863e−05 | 2.7e−09 | 38 000 |
+| 901 | 18 | +4.482e−06 | 4.4e−09 | 51 500 |
+
+Error ratios 3.88 and 4.16 across mesh ratios of 1.499, i.e. observed order
+**3.35** and **3.52** — consistent between both pairs and better than the second
+order expected. The mass flux is uniform to ~1e−09 throughout, so mass is
+conserved exactly and the discrepancy was always with the *analytic design
+chain*, never with conservation. Extrapolating puts the 1e−6 gate at roughly
+1400 cells.
+
+So staging is sound, and every earlier staged number was instrument or confound
+rather than physics.
+
+**The offset is measured in cells, and that is a trap for mesh studies.** §5
+Phase 3 chose `sample_offset` in *cells* because the numerical boundary layer is
+a stencil artefact and does not shrink under refinement — correct for choosing a
+default. But holding it at 12 cells while refining moves the station physically
+(3.0% of the duct at 401, 2.0% at 601), and `Fx` and `SWx` are computed from what
+it reads, so the source differs on each mesh. The sweep above scales the offset
+with the mesh precisely to avoid that; the version that did not came out
+non-monotonic (−9.378e−06 then +1.863e−05) and meant nothing.
+
+**Four confounded experiments in a row, and what they have in common.** Worth
+recording as a methodological note, because the same mistake wore four different
+costumes and cost more time than any of the physics:
 
 1. *pad = 3/10/25 at fixed gap.* Widening the flat also shortens the taper, so
    the area gradient steepens. Read as "flat width does not matter".
@@ -1517,13 +1541,24 @@ different costumes:
    middle one and was the least converged, which its peak-to-peak showed
    plainly. Read as "the error does not fall with refinement".
 
-In each case two things varied and one was reported. The fix for the first two
-is to hold the taper length fixed and move only the station; for the third, to
-converge on `residual_norm` rather than on a step count — which is also the
-measure that survives bleed (§3.22), so it is the right instrument twice over.
+4. *ncell = 401/601/901 at `sample_offset` = 12 cells.* Holding the offset in
+   cells — which is right for choosing a default, since the boundary layer is a
+   stencil artefact — moves the station *physically* under refinement, from 3.0%
+   of the duct to 2.0%. `Fx` and `SWx` are computed from what it reads, so the
+   source is a different source on each mesh. Came out non-monotonic
+   (−9.378e−06 then +1.863e−05) and meant nothing.
 
-None of the three refutes what it appeared to refute. **Flat width and mesh
-refinement are both still untested** on the staged train.
+In each case two things varied and one was reported. The fixes: hold the taper
+length fixed and move only the station; converge on `residual_norm` rather than
+a step count — also the measure that survives bleed (§3.22), so it is the right
+instrument twice over; and scale *every* physical length with the mesh, the
+sampling offset included, when the question is whether the model converges.
+
+With all four controlled, the answer came out clean and positive at order ~3.4.
+The lesson is not "be careful" — it is that a sweep is only a sweep if exactly
+one thing moves, and the cheapest check is to write down what else changed when
+the swept parameter did. **Flat width remains untested**; the two attempts at it
+both varied the taper gradient as well.
 
 ### 3.22 Designing for bleed and cooling flows, before they arrive
 
