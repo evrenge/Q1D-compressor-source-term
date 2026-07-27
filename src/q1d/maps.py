@@ -259,8 +259,9 @@ class BetaMap:
             raise ValueError(
                 f"{self.name}: inlet Wc is not monotonic in beta at Nc={corrected_speed:.4g} "
                 f"(span {100 * span:.2f}%), so it cannot be inverted. The speed line is "
-                f"vertical to within the tabulation — the compressor is choked there and the "
-                f"operating point is set by the downstream system, not by the inlet flow"
+                f"vertical to within the tabulation — the compressor is choked there. "
+                f"Use FlowMatchedCompressor, which relaxes beta on the residual and needs "
+                f"no inverse (PLAN.md §3.28)"
             )
         beta = self._invert(wc, Wc)
         return MapPoint(
