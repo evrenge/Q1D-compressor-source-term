@@ -1189,33 +1189,47 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
-### 3.29 What is left is the last 3% of the flow range, and it is β with nothing to grip
+### 3.29 What is left clusters toward choke, and it is β with nothing to grip
 
 The full-map sweep with §3.28's closure runs every tabulated speed line of all
 four maps — including the 13 the inverse refuses — at seven positions each,
 β = 0 and β = 1 among them. The failures that remain are not scattered. They sit
 in one place, and the place identifies the mechanism.
 
-**Every failure is in the last 3% of the `Wc` range.**
+**Failures concentrate toward choke — as a rate, not as a threshold.** Over 175
+swept cells, 158 hold and 17 do not. Binning by position along the `Wc` range:
 
-| case | position in `Wc` range | PR | outcome |
+| position in `Wc` | cells | failures | rate |
 | --- | --- | --- | --- |
-| `TranssonicCompressor` Nc 0.880 f = 0.85 | 1.000 | 1.538 | fails |
-| `TranssonicCompressor` Nc 0.880 f = 0.65 | 0.996 | 1.690 | fails |
-| `TranssonicCompressor` Nc 0.791 f = 0.85 | 0.995 | 1.378 | fails |
-| `HighPqPCompr` Nc 0.750 f = 0.85 | 0.993 | 4.128 | fails |
-| `TwoStgRadialCompr` Nc 0.600 f = 0.85 | 0.992 | 1.978 | fails |
-| `HighPqPCompr` Nc 0.700 f = 0.85 | 0.990 | 3.361 | fails |
-| `HighPqPCompr` Nc 0.750 f = 0.65 | 0.972 | 4.516 | fails |
-| `SubsonicCompressor` Nc 1.000 f = 0.85 | 0.961 | 1.934 | **holds** |
-| `HighPqPCompr` Nc 0.700 f = 0.50 | 0.907 | 3.954 | **holds** |
+| above 0.95 | 51 | 14 | **27%** |
+| below 0.95 | 124 | 3 | **2.4%** |
 
-§3.19 recorded the same weakness as "the last ~25% of the `Wc` range toward
-choke". It is now the last **3%** — an eightfold widening of the usable range,
-and the boundary is sharp rather than gradual.
+An eleven-fold concentration, and that is all it is. **There is no threshold.**
+An earlier draft of this section claimed "every failure is in the last 3% of the
+`Wc` range", generalised from the nine cells available at the time. The completed
+sweep refutes it twice over: 37 cells above position 0.95 *hold*, and three
+failures sit nowhere near choke —
 
-**The β = 1 column holds, and that is the diagnosis.** At *exactly* the choke end
-the point holds on every map — `HighPqPCompr` PR 3.149, `TwoStgRadialCompr`
+| off-pattern failure | position | note |
+| --- | --- | --- |
+| `HighPqPCompr` Nc 0.800 f = 0.00 | **0.000** | the *surge* end |
+| `TwoStgRadialCompr` Nc 0.650 f = 0.15 | 0.423 | the one DIED; surge, cf. §3.27 |
+| `SubsonicCompressor` Nc 1.200 f = 0.50 | 0.937 | below the claimed bracket |
+
+The boundary also moves with speed rather than sitting at a fixed position:
+`SubsonicCompressor` holds to 0.961 at Nc 1.0 but fails from 0.937 at Nc 1.2.
+
+**Where both closures fail, the inverse misses by less.** On
+`SubsonicCompressor` Nc 1.200, the inverse's near-choke failures are 9.3e−04 and
+1.1e−03; the residual closure's are 1.4e−01 and 1.0e−01, and it additionally
+fails at f = 0.50 where the inverse holds. The inverse pins β stiffly to the
+measured flow, so its failures are near misses; the relaxation lets β wander, so
+its failures are excursions. That is a genuine regression in the near-choke band,
+bought in exchange for the 13 speed lines that previously could not be run at
+all. Both trades are on the table and neither is free.
+
+**The β = 1 column holds, and that is still the diagnosis.** At *exactly* the
+choke end the point holds on every map — 37 such cells, no exceptions — `HighPqPCompr` PR 3.149, `TwoStgRadialCompr`
 PR 1.759, `TranssonicCompressor` PR 1.441. The same duct, the same pressure
 ratio, the same mesh, 0.5% away in flow, fails. The only difference is that at
 the end of the line β is pinned by the clamp and has no freedom, and 0.5% inside
