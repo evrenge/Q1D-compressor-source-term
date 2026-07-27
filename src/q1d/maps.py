@@ -520,11 +520,26 @@ class ECMFMap:
             j = int(np.searchsorted(n, corrected_speed) - 1)
             w = (corrected_speed - n[j]) / (n[j + 1] - n[j])
 
-        def at(col: int, a: np.ndarray) -> float:
-            # Clamp rather than extrapolate: off the end of a speed line is not
-            # a meaningful operating point, and 3.8 measured extrapolation as the
-            # worst error source on these maps.
-            return float(np.interp(ecmf, self.ecmf[:, col], a[:, col]))
+        def at(col: int, a: np.ndarray, extrapolate: bool = True) -> float:
+            """Linear in ECMF, holding the terminal *slope* past the ends.
+
+            §3.8 measured extrapolation as the worst error source on these maps,
+            and that stays true of the map's *value*. The *gradient* is a
+            separate question, and clamping gets it wrong in a way that matters.
+            ``np.interp`` returns a flat characteristic outside the data, and a
+            flat characteristic is exactly the zero-restoring-force condition
+            §3.34 identified as surge — so a clamped lookup manufactures an
+            artificial surge at the table ends and pins anything that wanders
+            out there. Holding the end slope keeps the restoring force that
+            pushes the point back into the data, which is where the converged
+            answer lives; the extrapolated values are transient, not the answer.
+            """
+            x, y = self.ecmf[:, col], a[:, col]
+            if extrapolate and ecmf < x[0]:
+                return float(y[0] + (ecmf - x[0]) * (y[1] - y[0]) / (x[1] - x[0]))
+            if extrapolate and ecmf > x[-1]:
+                return float(y[-1] + (ecmf - x[-1]) * (y[-1] - y[-2]) / (x[-1] - x[-2]))
+            return float(np.interp(ecmf, x, y))
 
         # Record that the demand left the table. Clamping is the right thing to
         # DO -- the map has no information out there and extrapolating it is
@@ -537,7 +552,10 @@ class ECMFMap:
 
         pr = at(j, self.PR) * (1.0 - w) + at(j + 1, self.PR) * w
         cw = at(j, self.corrected_work) * (1.0 - w) + at(j + 1, self.corrected_work) * w
-        ef = at(j, self.efficiency) * (1.0 - w) + at(j + 1, self.efficiency) * w
+        # Efficiency stays clamped: it has a pole on `TranssonicCompressor`
+        # (§3.6), and a slope taken next to a pole is not a slope.
+        ef = (at(j, self.efficiency, extrapolate=False) * (1.0 - w)
+              + at(j + 1, self.efficiency, extrapolate=False) * w)
         tau = 1.0 + cw / (self.gas.cp * T_REF)
         lo = float(min(self.ecmf[0, j], self.ecmf[0, j + 1]))
         hi = float(max(self.ecmf[-1, j], self.ecmf[-1, j + 1]))
