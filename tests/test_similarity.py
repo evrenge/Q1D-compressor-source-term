@@ -177,6 +177,61 @@ def test_similarity_scaling_holds_the_operating_point_above_pr_2():
 
 
 @pytest.mark.slow
+def test_the_whole_pressure_ratio_fits_in_one_node():
+    """A single-cell disk, carrying the entire pressure ratio.
+
+    This is the property the smear was hiding. Spread over 21 cells, PR 2.14 is
+    only 1.037 per node; in one cell it is 2.14, and that is what lets a map
+    move over its speed line without the node count having to change with it.
+
+    It works only because the level reference sits one cell *upstream* of the
+    forced cell. Reading it from the forced cell is self-referential and the
+    loop gain is of order ``(PR−1)/(2·n_smear)``, which a single cell cannot
+    afford: on ``HPC01`` at PR 5.040 that form gives ``max Re(λ) = +88.3`` and
+    dies at step 513, against −92.3 and a 8.6e−12 hold for this one
+    (``PLAN.md`` §3.20).
+    """
+    s, disk, d = build(scaling=True, n_smear=1)
+    for k in range(18_000):
+        try:
+            s.advance(s.timestep())
+        except (NonPhysicalState, ValueError) as ex:  # pragma: no cover
+            pytest.fail(f"single-node disk at PR {d.point.PR:.3f} failed at step {k}: {ex}")
+    err = disk.last.W / d.W - 1.0
+    assert abs(err) < 1e-6, f"PR {d.point.PR:.3f} in one node: W off by {err:.3e}"
+
+
+def test_the_level_reference_is_read_upstream_of_the_forced_cells():
+    """Pins the shift itself, not just its consequences.
+
+    Cheap and direct: perturbing the cell immediately upstream of a single-cell
+    disk must change the source, and perturbing the forced cell itself must not.
+    A refactor that "simplified" the reference back onto the forced cell would
+    pass every other test in this file until it met a narrow smear.
+    """
+    s, disk, _ = build(scaling=True, n_smear=1)
+    base = s.source(s)[1].sum()
+    cell = disk.cell
+
+    up = s.cv.copy()
+    s.cv[2, cell] *= 1.0001  # interior index `cell-1` -> full-array index `cell`
+    s._update_pressure()
+    s._sync_boundaries()
+    moved = s.source(s)[1].sum()
+    s.cv[:] = up
+    s._update_pressure()
+    s._sync_boundaries()
+
+    s.cv[2, cell + 1] *= 1.0001  # the forced cell itself
+    s._update_pressure()
+    s._sync_boundaries()
+    unmoved = s.source(s)[1].sum()
+
+    assert moved != base, "source ignores the cell upstream of the disk"
+    assert unmoved == base, "source responds to the cell it is forcing"
+
+
+@pytest.mark.slow
 def test_without_scaling_the_same_case_does_not_hold():
     """The other half of the gate: assert the old injection *fails*.
 

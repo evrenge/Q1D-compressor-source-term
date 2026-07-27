@@ -1156,6 +1156,64 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.20 The whole pressure ratio in one node — shift the reference upstream
+
+§3.18 left the scaling needing a wide smear, because it divided by the pressure
+of the cell it was forcing. That is self-referential: a force raises that cell's
+own pressure through its own momentum equation, and the loop has gain of order
+`(PR−1)/(2·n_smear)` — about 0.1 for a 21-cell smear at PR 5, and above one for
+a single cell. Since every high-PR result used `n_smear = 21`, the per-node
+pressure rise was only ~1.08, short of the 1.1–1.6 that would let a map vary
+without changing the node count at runtime.
+
+The self-interaction is not intrinsic. What the scaling needs is the local
+pressure *level*, and it can be read one cell upstream, where the diagonal term
+does not exist. Largest eigenvalue of the linearised design state, `HPC01`:
+
+| `n_smear` | per node | source off | reference = forced cell | **reference = one cell up** |
+| --- | --- | --- | --- | --- |
+| **1** | **5.040** | +86.7 | +88.3 | **−92.3** |
+| 3 | 1.715 | +86.7 | +8.1 | **−76.5** |
+| 7 | 1.260 | +86.8 | −14.3 | **−77.8** |
+| 21 | 1.080 | +87.3 | −34.6 | **−64.8** |
+
+(at Nc 0.8, design at 0.2 of the ECMF range). The shift is not a refinement: it
+is what makes a single-cell disk work at all, and it roughly doubles the margin
+at wide smears as well. It is still exactly inert at any steady state, so the
+operating point does not move and every §3.18 measurement stands.
+
+Two dead ends worth recording, because both look reasonable:
+
+* **Referencing a fixed cell just upstream of the whole smear** (one scalar for
+  all forced cells) works beautifully at `n_smear` 1 and 3 and is catastrophic
+  at 7 and 21 — +7609 and +1559. Of course: a single upstream cell is a poor
+  proxy for the level twenty cells further on, inside a region that has already
+  compressed the flow several-fold. The reference must be local *per cell*.
+* **Shifting by two cells** rather than one is worse where it matters, +6914 at
+  `n_smear = 1`, so the shift wants to be the smallest that removes the diagonal.
+
+**Confirmed nonlinearly**, `HPC01`, 201 cells, 40,000 steps, mass-flow offset and
+peak-to-peak over the last half:
+
+| Nc | `n_smear` | PR | per node | reference = forced cell | **reference = one cell up** |
+| --- | --- | --- | --- | --- | --- |
+| 0.6 | 1 | 2.257 | **2.257** | held, +6.62e−12 | held, **+6.66e−12**, pk-pk **0** |
+| 0.6 | 21 | 2.257 | 1.040 | held, +1.008e−10 | held, +1.008e−10, pk-pk 9.6e−15 |
+| 0.8 | 1 | 5.040 | **5.040** | **dies at step 513** | held, **+8.58e−12**, pk-pk **0** |
+| 0.8 | 3 | 5.040 | 1.715 | dies at 1813 | **dies at 3247** |
+
+So the whole of PR 5.040 goes into **one cell** and sits there to 8.6e−12 with a
+peak-to-peak of exactly zero, where the previous form died in 513 steps. That
+clears the 1.1–1.6 per-node target by a wide margin and removes the reason the
+node count would have had to track the map at runtime.
+
+**The `n_smear = 3` row is an open anomaly and is not explained.** Its linearised
+eigenvalue is −76.5, comfortably stable, yet it dies at step 3247 — so it is a
+basin failure like the Nc ≥ 1.0 startups of §3.19, not a stability one, and the
+behaviour is *non-monotonic* in smear width (1 holds, 3 dies, 21 holds). Until
+that is understood, `n_smear` should be taken as 1 or ≳ 7 rather than anything
+between, and the reason recorded as "unexplained", not "tuned".
+
 ### 3.19 The residual limit cycle is the ICMF conditioning problem, not the closure
 
 With the scaling in place, `HPC01` at Nc 0.7 (PR 3.104) converges to a mean
