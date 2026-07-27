@@ -1592,13 +1592,45 @@ worse than one, so the per-stage errors are not accumulating.
 That is past the OPR ≈ 80 that motivated the whole exercise, with real maps and
 every stage finding its own operating point.
 
+**Off-design: the stages find each other.** The table above is a *design-point*
+result — every stage was seeded where its scaled map was built for, so nothing
+had to move and a constant-PR map would have looked identical. Throttling is what
+separates them: raise the back pressure and the machine must find a new
+equilibrium, with less flow, lower `Wc` at every stage, and therefore more `PR`
+from each along its own speed line, until the delivered pressure matches the
+load. That is component matching, and the analytic chain gives the answer
+independently — walk the stages for a candidate `W`, and solve for the `W` whose
+delivered exit static equals the imposed back pressure.
+
+Four stages, `SubsonicCompressor`:
+
+| `p_back`/design | `W` analytic | `W` solver | solver vs analytic |
+| --- | --- | --- | --- |
+| 1.00 | 51.0188 | 51.0187 | −1.697e−06 |
+| 1.02 | 50.9206 | 50.9205 | −2.108e−06 |
+| 1.05 | 50.7332 | 50.7331 | −3.177e−06 |
+| 0.98 | 51.1014 | 51.1013 | −1.269e−06 |
+| 0.95 | 51.2029 | 51.2029 | −8.709e−07 |
+
+**1–3e−06 across the range.** The solver finds the same equilibrium the map
+algebra does, which is the property the whole source-term formulation exists to
+deliver and which a constant-PR stage cannot test at all.
+
+**The throttle range is narrow, and that is physical.** Above about +4% flow the
+*exit* chokes: more flow puts every stage at higher `Wc`, so each delivers less
+pressure, so exit `p₀` falls while `W` rises and the exit flow function climbs
+faster than linearly. A fixed exit area therefore limits the range. A real engine
+does not have one — the turbine nozzle downstream is itself an area — so a wider
+excursion needs the next component, not a fix here. It also means the analytic
+matching function is one-sided about the design point and cannot be bracketed by
+bisection from a fixed interval; it is scanned instead.
+
 **What this is not.** Perfect gas, γ = 1.4 and constant `cp`, with an exit at
 1265 K where real-gas effects are large — Phase 4 will move these numbers and
-they should not be quoted as physical until it does. One speed line. Stage
-stacking puts every stage at the same relative map point, where a real machine
-has stage-to-stage variation. And it is a design-point result: the off-design
-matching, where the stages have to slide along their maps to find each other, is
-the next test and the one the real slope actually gets exercised by.
+they should not be quoted as physical until it does. One speed line, one map.
+Stage stacking puts every stage at the same relative map point, where a real
+machine has stage-to-stage variation. No surge-line or choke-line behaviour has
+been exercised.
 
 ### 3.23 The upstream "boundary layer" was the probe, and it cost 10 cells a row
 
