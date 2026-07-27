@@ -1189,7 +1189,48 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
-### 3.31 The full sweep: ECMF keying solves rank deficiency completely and loses high pressure ratio
+### 3.32 The high-PR ceiling was an unfiltered key, not the keying
+
+§3.31 concludes that ECMF keying loses high pressure ratio, and calls it a
+capability regression. That conclusion measured a bug of mine, not the closure.
+
+The signature §3.31 was left with — mesh-independent, gain-independent,
+PR-dependent — matches a mechanism this project already documents. §3.11–§3.13:
+an **unfiltered** input to the disk opens an acoustic feedback loop whose gain
+**grows with pressure ratio**. The disk held at PR 1.2 and failed from 1.4 until
+the inlet stagnation state was lagged, and lagging `W` as well was needed past
+PR 2.0. A filter time constant is physical, so nothing about that shrinks with
+the mesh.
+
+`EcmfCompressor` filtered the inlet state through `InletFilter` and then handed
+the map a **raw** exit reading. I added an input and did not give it the
+treatment §3.12 exists to provide.
+
+Lagging the key, same first-order filter:
+
+| case | no key lag | `key_lag` = 1e−2 |
+| --- | --- | --- |
+| `HighPqPCompr` Nc 0.850, PR 8.121 | +1.795e−01, never converges | **+5.40e−08 HELD** |
+| `TwoStgRadialCompr` Nc 0.900, PR 10.103 | −5.516e−02, never converges | **+1.43e−07 HELD** |
+| `HighPqPCompr` Nc 0.950, PR 15.883 | **died at step 387** | **+1.52e−07 HELD** |
+| `SubsonicCompressor` Nc 1.000, PR 2.141 | +3.9983e−07 HELD | +4.0038e−07 HELD |
+
+The last row is the one that makes it a fix rather than a knob. A first-order lag
+has **unit DC gain**, so it cannot move a converged answer — and it does not, by
+5.5e−11. The same argument, and the same test, §3.12 used for the inlet lag.
+`key_lag` 1e−1 gives the same answers as 1e−2 to within 6e−08 on every case, over
+a tenfold range.
+
+**PR 15.883 held to 1.52e−07, on a line the inverse cannot invert at all.** That
+is above the project's previous best of PR 14.972 (§3.27), and it is
+simultaneously rank-deficient and higher pressure ratio than anything held
+before.
+
+So the two problems were never one problem. Rank deficiency needed ECMF keying;
+the pressure-ratio ceiling needed the key filtered. Neither fixes the other, and
+§3.31's tables measure the second defect while the first was already solved.
+
+### 3.31 The full sweep: ECMF keying solves rank deficiency completely and loses high pressure ratio *(superseded by §3.32 — its high-PR half measures an unfiltered key)*
 
 §3.30's closure, swept over the same grid as §3.27 — every tabulated speed line,
 seven positions including both β ends, `densify` 36, single disk, 201 cells.
