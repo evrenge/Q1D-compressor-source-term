@@ -1296,6 +1296,20 @@ the four cells above converge at 1e−10 to 1e−11 while logging 1281 to 12442
 excursions each. Leaving the table during the transient is now normal and
 expected; the counter records that it happened, and nothing more.
 
+**One pre-existing test failure, verified not mine.**
+`test_flowmatch.py::TestItWorksWhereTheInverseRefuses::test_it_holds_the_operating_point_anyway[0.85]`
+fails at PR 1.538 with `W` off by −6.227e−02. Run at HEAD and at 96bd4aa, the
+commit that introduced it: **identical to every digit**, so it has failed since
+it was written and nothing in §3.32–§3.37 touched it. It exercises
+`FlowMatchedCompressor`, whose `exit_offset` defaults to `None` and which
+therefore takes the β path that none of this work goes near.
+
+Worth keeping rather than silencing, because of what it measures: `EcmfCompressor`
+holds that exact cell — `TranssonicCompressor` Nc 0.880, `f` = 0.85, PR 1.538 —
+in every sweep today. The failing test is a limitation of the closure being
+replaced, on a point the replacement handles. Suite otherwise: **339 passed, 1
+failed, 1 skipped.**
+
 **Open, and what each is worth.** Three turbine maps still fail to load and a
 fourth — `MediumPqPTurbine` — loads *silently corrupt*: at PR 1.0642 with
 η = −0.0339 the loader derives −153,401 J/kg against an ideal Δh₀ of ≈ 5,190,
