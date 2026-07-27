@@ -1189,6 +1189,100 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.38 Every turbine map was being read as a compressor
+
+Three of the seventeen supplied workbooks would not load — `HighPqPTurbine`,
+`RadialTurbine`, `TwoStgTurbine`, all raising `non-physical temperature ratio`.
+The obvious reading is that turbines need hot, high-pressure inlet conditions
+and were being handed ambient ones. That reading is wrong, and the algebra says
+so before any measurement: the check is
+
+```
+dh0s = cp·T_ref·(PR^k − 1);   cw = dh0s/η;   τ = 1 + cw/(cp·T_ref)
+```
+
+in which **`T_ref` cancels exactly**, leaving `τ = 1 + (PR^k − 1)/η` — a function
+of two workbook columns and nothing else. No inlet condition can move it. Inlet
+temperature and pressure matter at design and solve, which is code these three
+maps never reached.
+
+**What was actually wrong: three errors stacked in one expression.**
+
+| | used | correct for a turbine |
+| --- | --- | --- |
+| isentropic relation | `cp·T_ref·(PR^k − 1)` — a compression *rise* | `cp·T_ref·(1 − PR^−k)` — an expansion *drop* |
+| efficiency | `work = ideal/η`, more than ideal | `work = ideal·η`, less than ideal |
+| ECMF factor | `Wc·√τ/PR`, assuming `PR = p₀₂/p₀₁` | `Wc·√τ·PR`, the expansion ratio |
+
+Together they gave **every cell of every turbine map a temperature rise**. A
+PR 3, η 0.9 stage came out at **+41% where it must drop 24%**.
+
+**And the crash was the lucky half.** Three maps raised; the other three loaded
+and were quietly wrong. `MediumPqPTurbine` at PR 1.0642 with η = −0.0339 derived
+**−153,401 J/kg** against an ideal Δh₀ of ≈ 5,190 — a 53% temperature drop across
+a 6% pressure ratio — and passed `τ > 0` on magnitude alone. A loud failure on
+three files hid a silent one on a fourth.
+
+**Kind is inferred from the machine, not declared.** A compressor throttled
+toward surge passes less flow at more pressure ratio; a turbine passes more as
+the expansion ratio opens. The sign of `dWc/dPR` therefore separates them, and
+over all seventeen workbooks it is unanimous — **positive on 64 of 64 turbine
+speed lines, negative on 109 of 109 compressor lines**, no map mixed. Preferred
+to the other unanimous signal (compressors carry a `surge_line` sheet, turbines
+do not) because that is a filing convention and this is the machine. `kind=`
+overrides it.
+
+**η ≤ 0 is repaired on turbines only, and the asymmetry is the finding.** The old
+docstring declined to special-case those cells because "the numerator changes
+sign with the denominator". Measured: that holds on **12 of 12** such compressor
+cells and fails on **35 of 36** turbine cells. On a compressor they all sit at
+PR < 1, so the cancellation is real and yields τ > 1 — work in, temperature up,
+pressure down, a stalled corner correctly modelled. **It was right about
+compressors and wrong only about turbines**, so compressor cells are left exactly
+alone; the first version of this fix repaired both and broke `IPC01`, `LPC01` and
+`LPC02` by turning that corner into cooling. Turbine repairs interpolate η along
+β from the valid cells of the same line, are listed in
+`BetaMap.repaired_efficiency`, and a line with no usable cell is refused rather
+than invented.
+
+**All six turbines now load, densify, and key on PR:**
+
+| map | grid | η repaired | τ range | max work out |
+| --- | --- | --- | --- | --- |
+| `HighPqPTurbine` | 50×15 | 18 | 0.585–1.000 | 120.0 kJ/kg |
+| `Ipt01` | 20×7 | 0 | 0.802–0.987 | 57.4 kJ/kg |
+| `MediumPqPTurbine` | 30×10 | 3 | 0.731–0.999 | 78.0 kJ/kg |
+| `RadialTurbine` | 20×7 | 1 | 0.726–0.981 | 79.4 kJ/kg |
+| `SingleStgTurbine` | 20×5 | 0 | 0.726–0.901 | 79.2 kJ/kg |
+| `TwoStgTurbine` | 20×20 | 14 | 0.599–1.000 | 116.0 kJ/kg |
+
+**The key follows the machine.** ECMF is monotonic in β on 135 of 135 compressor
+lines but only **17 of 64** turbine lines, where `PR` manages **64 of 64**.
+Neither generalises, so `ECMFMap.from_beta_map` dispatches on `kind`, and the
+key array is named `key` with `key_field` saying what it holds. `.ecmf` survives
+as a property that returns it for a compressor and **raises** on a PR-keyed map:
+handing back `PR` under the name `ecmf` is exactly the class of error that cost
+§3.37 an afternoon, and it is worth a loud attribute error to make impossible.
+
+`densify` needed the same lesson. It rebuilt a `BetaMap` without `kind` and
+re-derived η and ECMF with the compressor forms, so a densified turbine reverted
+to a compressor one call after the loader decided otherwise — silently, since
+both forms are dimensionally fine.
+
+**Compressors are untouched, and that is verified rather than asserted.**
+Bit-identical to §3.37's `964d177` at load (11 maps × 5 arrays) and through
+`evaluate` (15 keys per speed line spanning −0.2 to 1.2 of the range, so both
+off-table branches, × 5 returned fields): **0.000e+00**. That included keeping
+`ecmf` as a division rather than a reciprocal multiply, which differs in the
+last bit — a one-ULP drift that the first draft of this change introduced and
+that the comparison caught.
+
+**Still open.** The turbines load and are keyed; they have not been *run*. The
+disk closure, the design path and the sweep harness are all written around a
+compressor — a turbine's corrected work is negative, which at minimum inverts
+what the source term does to the flow — so end-to-end turbine operation is the
+next piece, and it is a larger one than this.
+
 ### 3.37 A clamped map end *is* a surge condition, and the library closes at 292/315
 
 **The convention, measured, because it was being used backwards.** On all four
