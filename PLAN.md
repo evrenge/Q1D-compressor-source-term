@@ -1189,6 +1189,80 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.28 β as a relaxation on the residual — the map's inverse was never needed
+
+§3.26 left the closure blocked: keying on inlet `Wc` refuses 13 of 45 tabulated
+speed lines because on a choked line the whole β range compresses into ~1% of
+`Wc`. Both replacements proposed there turned out to be wrong, and the fix is
+smaller than either.
+
+**The downstream-error closure is degenerate, not merely awkward.** §3.26's
+second candidate was `τ dβ/dt = K·(p₀₂ measured − p₀₂ predicted at β)`. It cannot
+work: `p₀₂` is *what this source injects*. In a constant-area duct the scheme
+realises the injected total pressure to within its own dissipation, so
+`PR_meas ≡ PR(β)` for **every** β and the residual is identically zero. There is
+nothing to solve. This is worse than the algebraic loop §3.9 rejected — that one
+at least had a root.
+
+**Nothing needed the inverse in the first place.** The steady operating point is
+where two curves in `(W, PR)` cross: the map's speed line, falling, and the duct
+with a fixed back pressure, rising. A *vertical* line still crosses a rising one
+transversally — the intersection is perfectly well posed. Only the algorithm was
+ill-posed, because inverting `Wc(β)` asks a question the intersection never asks.
+
+So β becomes a state relaxed on the residual, and nothing is ever inverted:
+
+```
+τ dβ/dt = K · [Wc_meas/Wc_map(β) − 1] / (∂lnECMF/∂β)
+```
+
+**Which slope goes in the denominator is the entire design.** The step is a
+damped Newton step on the residual, so the denominator wants to be `∂R/∂β`.
+Writing it out, with `c = ∂lnW/∂lnPR` of the duct — positive, O(1):
+
+```
+∂R/∂β ≈ c·∂lnPR/∂β − ∂lnWc/∂β
+```
+
+Take `c = 1` and that is exactly `−∂lnECMF/∂β`. ECMF is not one candidate among
+three; it is what the coupled residual's derivative *reduces to*. Measured over
+all 45 tabulated lines of the four compressor maps:
+
+| slope | reverses sign | floor over all 45 lines |
+| --- | --- | --- |
+| `∂lnWc/∂β` | on every refused line | **0** — that is what "refused" means |
+| `∂lnPR/∂β` | on **20 of 45**, at the surge peak | **0** |
+| `∂lnECMF/∂β` | never | **0.225** |
+
+I built the pressure-slope version first, on the reasoning that a compressor
+always makes pressure. It is wrong past the surge peak, where PR falls again
+toward lower flow: the sign flips and β is driven the wrong way. It killed
+`TwoStgRadialCompr` Nc 0.600 at f = 0.15 and left f = 0.85 1.5e−01 out — both
+points the inverse holds. The ECMF slope has no such point on any supplied map,
+which is the property `q1d.maps` already documents as the reason ECMF exists.
+
+**This is not the exit-ECMF closure §3.9 rejected.** ECMF enters as a *derivative
+of the tabulated map at the current β*, never as a measurement. The measured
+quantity is still the upstream `Wc`, so §3.14's property survives untouched: the
+disk does not read its own output. A slope of a table closes no loop.
+
+**It is the same closure, solved differently.** At steady state `dβ/dt = 0` forces
+`Wc_meas = Wc_map(β)` — the identical equation `InletFlowCompressor` inverts. So
+the two must agree wherever both can run, and they do. `SubsonicCompressor`
+Nc 1.0:
+
+| position | converged β | design β | error |
+| --- | --- | --- | --- |
+| f = 0.15 | 0.785800 | 0.785800 | −3.7e−09 |
+| f = 0.50 | 0.390300 | 0.390300 | +9.6e−13 |
+| f = 0.85 | 0.101600 | 0.101600 | −1.2e−10 |
+| f = 0.50, seeded β − 0.2 | 0.390300 | 0.390300 | +1.2e−10 |
+| f = 0.50, seeded β + 0.2 | 0.390300 | 0.390300 | −1.4e−10 |
+
+The seeded rows matter more than the first three. Without them the table only
+shows the closure is inert where it was put; with them it shows the fixed point
+*attracts* from 0.2 away in either direction.
+
 ### 3.27 The full-map sweep, and surge as a correct failure
 
 225 operating points: four maps, every tabulated speed line, positions 0.15 to
@@ -1286,18 +1360,26 @@ The operating point must be either downstream-informed or a dynamical state.
 `τ dβ/dt = β_map(Wc) − β`, which still needs the same inversion; it addresses
 acoustic amplification (§3.10), not invertibility.
 
-**Two candidate closures, neither built.**
+**Two candidate closures, neither built** — *both superseded by §3.28, and the
+second is wrong.*
 
 1. *Exit ECMF solved simultaneously.* §3.9 rejected it because the algebraic loop
    has measured gain `−dlnPR/dlnECMF` of 0.90 to 1.10, and above one a
    fixed-point iteration diverges for every relaxation factor. That is an
    argument against fixed-point iteration, not against the closure — and
    `ImplicitStepper` (§3.17) now exists to solve the state and the closure
-   together.
+   together. Not needed: §3.28 gets there without implicit machinery.
 2. *β driven by a downstream error.* `τ dβ/dt = K·(p₀₂ measured − p₀₂ predicted
-   at β)` — the operating point slides until what the machine delivers matches
-   what the duct demands, which is what component matching *is*, and what a real
-   compressor on a throttle actually does. Nothing is inverted.
+   at β)`. **This cannot work.** `p₀₂` is what the source injects, so
+   `PR_meas ≡ PR(β)` for every β to within the scheme's dissipation: the residual
+   is identically zero and there is nothing to solve. Worse than the loop §3.9
+   rejected — that one at least had a root. See §3.28.
+
+**The premise this section rests on is also wrong, and that is the way out.** It
+concludes that "the operating point must be either downstream-informed or a
+dynamical state" *because* `Wc → β` cannot be inverted. True — but nothing needs
+that inverse. §3.28 keeps the measurement upstream, inverts nothing, and works on
+a vertical line.
 
 ### 3.25 Re-measuring the open failures — most of them were already fixed
 
@@ -2448,12 +2530,18 @@ D10.
 ## 8. Known gaps
 
 > **The pressure-ratio limit is resolved.** §3.16 identifies the cause and §3.18
-> the fix; §3.19 characterises what remains. The three entries immediately below
-> are kept because their *measurements* are sound and several are still the best
-> record of what was tried, but their conclusions are superseded. Current status:
-> **PR 5.040 held to 1.4e-10** on `HPC01` at Nc 0.8, and PR 3.104 to 6.3e-11,
-> provided the operating point is not in the last ~25% of the `Wc` range toward
-> choke. Near-choke points still cycle (§3.19), and that is now the open problem.
+> the fix. The three entries immediately below are kept because their
+> *measurements* are sound and several are still the best record of what was
+> tried, but their conclusions are superseded. Current status: **PR 14.972 held**
+> on `HighPqPCompr` at Nc 0.925 and **PR 11.254** on `TwoStgRadialCompr` at
+> Nc 0.900, single disk (§3.27). §3.19's near-choke limit cycle and its Nc ≥ 1.0
+> startup deaths were **re-measured and are gone** (§3.25).
+>
+> **The closure limit is resolved too.** §3.26 recorded that inlet-`Wc` keying
+> refuses 29% of the tabulated speed lines. §3.28 replaces the inversion with a
+> relaxation on the residual, which needs no inverse and works on a vertical
+> line. Wherever this document says a speed line "cannot be closed on", read it
+> as a property of `InletFlowCompressor`, not of the solver.
 
 - ~~**Fixed to PR 2.0, not beyond.**~~ **Superseded by §3.18.** The inlet lag on
   `(T₀₁, p₀₁, W)` (§3.12, §3.13) holds the operating point to ~2e-10 up to
@@ -2482,8 +2570,10 @@ D10.
   at any standoff from 0.12% to 3%, or with any remedy tried (§3.9). On
   `SubsonicCompressor` that is Nc ≤ 0.672 of 12 speed lines; on
   `TranssonicCompressor`, Nc ≤ 0.528 of 9, with the top five refusing the inlet
-  closure outright because `Wc` is not invertible there. **Nothing above those
-  speeds should be trusted or reported as working.** The question is no longer
+  closure outright because `Wc` is not invertible there. ~~**Nothing above those
+  speeds should be trusted or reported as working.**~~ **No longer true**: the
+  refusal was `InletFlowCompressor` needing an inverse that does not exist, and
+  §3.28 removes the need for it. The question is no longer
   "where is the bug" — `Z` is the acoustic-impedance criterion and the disk is a
   wave amplifier above it — but "what unsteady compressor response replaces the
   quasi-steady map". That is the next piece of modelling, not the next debugging
