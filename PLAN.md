@@ -1214,6 +1214,70 @@ behaviour is *non-monotonic* in smear width (1 holds, 3 dies, 21 holds). Until
 that is understood, `n_smear` should be taken as 1 or ≳ 7 rather than anything
 between, and the reason recorded as "unexplained", not "tuned".
 
+### 3.21 Chaining stages, and the annulus taper that goes with them
+
+With a single node able to carry PR 5.040 (§3.20), staging is the route to engine
+overall pressure ratio. §3.14's conclusion — "PR 2.0 splits, PR 4.0 fails at
+every split" — was measured on the injection §3.16 has since shown to be wrong,
+so the question was open again.
+
+**Constant-area staging works but is physically absurd.** Twelve stages at 1.328
+each, OPR 30, `n_smear = 1`: the old injection dies at step 5302, the fixed one
+survives. But the exit Mach is **0.023** — the machine discharging into what is
+nearly a plenum, because at OPR 30 the density is up thirtyfold and a constant
+annulus cannot absorb it. No compressor is built that way; the annulus tapers,
+and the more so the higher the pressure ratio.
+
+**With a taper, sized to hold the axial Mach at its inlet value:**
+
+| OPR | stages | stage PR | exit M | `A_n/A_0` |
+| --- | --- | --- | --- | --- |
+| 4.0 | 4 | 1.414 | 0.450 | 0.311 |
+| 14.0 | 8 | 1.391 | 0.450 | 0.108 |
+| 30.0 | 12 | 1.328 | 0.450 | **0.057** |
+
+Each disk sits on a constant-area flat — required by §4.5, and also how a real
+machine is laid out — with the contraction taken in the gap between rows.
+
+**The taper exposed a first-order error, and the cause is the area profile's
+kinks.** A single stage in a tapered duct converged (peak-to-peak 1e−7) to a
+*steady* offset of −4.7e−04, where the same disk in a constant-area duct holds
+to −1.1e−07. Decomposed:
+
+| case | result |
+| --- | --- |
+| constant area + disk | held, −1.11e−07 |
+| taper, **no disk** | second order: −5.9e−07, −1.4e−07, +1.7e−10 at 301/601/1201 |
+| taper + disk | **first order**: −9.37e−04, −4.70e−04, −2.32e−04 |
+
+So neither ingredient is at fault alone; the *interaction* is first order. Two
+hypotheses were tested and killed first — the lead-in distance (moving the first
+disk downstream changes nothing, −4.58e−04 → −4.92e−04, though it did reveal
+that the rig had been sampling the first interior cell) and the width of the
+constant-area flat around the disk (3, 10, 25 cells: −4.70e−04, −4.76e−04,
+−4.89e−04).
+
+The cause is that the area was piecewise linear, so `dA/dx` is **discontinuous at
+every knot** and the limiter clips at those corners. Making the profile C¹ — a
+smoothstep blend, zero slope at both ends of each segment, which is also how an
+annulus line is actually drawn — gives at 601 cells:
+
+```
+    piecewise linear   −4.70e−04
+    C1 smoothstep      −2.70e−06        ~170x
+```
+
+**Rule for the engine model: every annulus transition wants a C¹ area
+distribution.** A corner in the wall line is cheap to draw and expensive to
+compute next to a source term.
+
+**Status.** Single tapered stage: −2.7e−06 and converged. Trains of 4, 8 and 12
+stages improve with the smooth annulus (OPR 4: −6.2e−04 → +9.5e−05) but their
+peak-to-peak is still comparable to their mean at 30,000 steps, so they are not
+converged and **must not be reported as held**. A 12-stage train took ~50,000
+steps to settle in the earlier trace; the convergence run is what decides whether
+staged OPR 30 meets the 1e−6 gate.
+
 ### 3.19 The residual limit cycle is the ICMF conditioning problem, not the closure
 
 With the scaling in place, `HPC01` at Nc 0.7 (PR 3.104) converges to a mean
