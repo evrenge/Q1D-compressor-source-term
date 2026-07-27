@@ -41,6 +41,8 @@ __all__ = [
     "MappedDiskState",
     "InletFlowCompressor",
     "UnsteadyMappedCompressor",
+    "FlowMatchedCompressor",
+    "CompositeSource",
     "InletFilter",
     "rotor_period",
 ]
@@ -194,6 +196,41 @@ def rotor_period(rpm: float) -> float:
     if rpm <= 0.0:
         raise ValueError(f"rpm must be positive, got {rpm!r}")
     return 60.0 / rpm
+
+
+@dataclass
+class CompositeSource:
+    """Several sources on one duct, summed.
+
+    The endgame is a whole engine on a single mesh — a multistage compressor,
+    then a burner, then a turbine, each a source on its own cells. The solver
+    takes exactly one ``source``, so the composition lives here.
+
+    Summation is the right operation and not merely a convenient one: the
+    right-hand side of the quasi-1D system is a sum of independent volumetric
+    contributions, and each component writes to its own disjoint cells. It is
+    *not* checked that the spans are disjoint — a bleed port and the blade row
+    it bleeds from may legitimately share cells.
+
+    Each member is called once per evaluation, in order, and each therefore sees
+    the same solver state. Members that carry internal state advance it on their
+    own ``solver.t`` detection, so the ordering here does not affect the result.
+    """
+
+    members: tuple
+
+    def __init__(self, *members) -> None:
+        if len(members) == 1 and not callable(members[0]):
+            members = tuple(members[0])
+        if not members:
+            raise ValueError("CompositeSource needs at least one member")
+        self.members = tuple(members)
+
+    def __call__(self, solver: Solver) -> np.ndarray:
+        out = self.members[0](solver)
+        for m in self.members[1:]:
+            out = out + m(solver)
+        return out
 
 
 class CompressorMap(Protocol):
@@ -1027,4 +1064,233 @@ class UnsteadyMappedCompressor:
         span = slice(self.cell, self.cell + self.n_smear)
         q[1, span] = Fx * self._weights
         q[2, span] = SWx * self._weights
+        return q
+
+
+@dataclass
+class FlowMatchedCompressor:
+    """Compressor whose map position is driven by the flow **residual**.
+
+    :class:`InletFlowCompressor` inverts the map: it measures ``Wc`` upstream and
+    asks the speed line which β has that flow. That inverse does not exist on
+    29% of the tabulated speed lines — 13 of 45 across the four supplied
+    compressor maps, always the top ones — and the reason is rank deficiency
+    rather than conditioning. On ``TranssonicCompressor`` at Nc 1.144 the whole
+    β range spans 9.97e−03 in ``Wc`` while ``PR`` spans 4.94e−01: the speed line
+    is vertical to within the tabulation, so no measurement of the inlet flow can
+    select a point on it (``PLAN.md`` §3.26).
+
+    Nothing in the physics needs that inverse. The steady operating point is the
+    intersection of two curves in ``(W, PR)`` — the map's speed line, falling,
+    and the duct with a fixed back pressure, rising — and a vertical line still
+    crosses a rising one transversally. Only the *algorithm* was ill-posed.
+
+    So β becomes a state driven by the residual and never by the inverse:
+
+    .. math::
+
+        \\tau \\frac{d\\beta}{dt}
+            = -K\\,\\frac{W_c^\\text{meas}/W_c^\\text{map}(\\beta) - 1}
+                        {\\partial \\ln PR/\\partial \\beta}
+
+    Four things make this work where the inverse does not.
+
+    **The scale factor is the pressure slope, not the flow slope.** Dividing by
+    ``∂lnWc/∂β`` would be Newton's method on the map, and on a refused line that
+    derivative *changes sign* — it passes through zero, which is the same fact
+    that stops :meth:`BetaMap.evaluate_at_Wc` inverting it, so the Newton step is
+    singular rather than merely large. ``∂lnPR/∂β`` keeps one sign and stays
+    bounded away from zero on every line of every supplied map (0.14 at Nc 0.88
+    on ``TranssonicCompressor``, 0.36 at Nc 1.144) — that is what "the compressor
+    makes pressure" means — so it is a usable scale where the flow slope is not.
+
+    **The measurement stays upstream.** ``Wc`` is read at the same station as
+    :class:`InletFlowCompressor`, so §3.14's property survives: the disk never
+    reads its own output. Keying on the exit pressure instead would be worse than
+    ill-conditioned, it would be *degenerate* — ``p₀₂`` is what this source
+    injects, so ``PR_meas ≡ PR(β)`` to within the scheme's dissipation and the
+    residual carries no information about β at all.
+
+    **The sign is restoring.** ``Wc_meas > Wc_map(β)`` means the duct is passing
+    more than the map allows at this position, so β must move toward choke, which
+    lowers ``PR``, which raises the inlet static pressure against a fixed inlet
+    total, which lowers ``W``. ``∂lnPR/∂β`` carries the sign of the map's
+    orientation, so the leading minus is correct for either β convention.
+
+    **The fixed point is the map, exactly.** At steady state ``dβ/dt = 0`` forces
+    ``Wc_meas = Wc_map(β)``, which is the same equation :class:`InletFlowCompressor`
+    solves — so this is a different *solver* for the identical closure, not a
+    different machine. Measured on ``SubsonicCompressor`` at Nc 1.0, converged β
+    lands on the design β to 1e−10 at f = 0.15, 0.5 and 0.85, and seeding β 0.2
+    away in either direction walks back to the same value to 1.4e−10.
+
+    ``tau`` and ``gain`` set only how fast it gets there, never where. ``tau``
+    defaults to the blade row's through-flow time, as in
+    :class:`UnsteadyMappedCompressor`, which is reduced frequency one and needs
+    no data the maps do not carry.
+    """
+
+    cell: int
+    beta_map: object  # BetaMap or ScaledMap; loose to avoid a circular import
+    corrected_speed: float
+    sample_offset: int = 2
+    n_smear: int = 1
+    inlet_lag: float = 0.0
+    similarity_scaling: bool = True
+    gain: float = 1.0
+    tau: float | None = None  # None -> blade-row through-flow time
+    beta0: float | None = None  # None -> start at mid-line
+    last: MappedDiskState = field(default_factory=MappedDiskState)
+
+    _weights: np.ndarray = field(init=False, repr=False, default=None)
+    _filter: InletFilter = field(init=False, repr=False, default=None)
+    _levels: LocalLevelFilter = field(init=False, repr=False, default=None)
+    _beta: float = field(init=False, repr=False, default=math.nan)
+    _t_prev: float = field(init=False, repr=False, default=math.nan)
+    _tau: float = field(init=False, repr=False, default=math.nan)
+    _reversals: int = field(init=False, repr=False, default=0)
+    _clamps: int = field(init=False, repr=False, default=0)
+
+    def __post_init__(self) -> None:
+        if self.n_smear < 1:
+            raise ValueError(f"n_smear must be >= 1, got {self.n_smear!r}")
+        if self.sample_offset < 1:
+            raise ValueError("sample_offset must be >= 1 so the disk cell itself is not read")
+        if self.tau is not None and self.tau <= 0.0:
+            raise ValueError(f"tau must be positive, got {self.tau!r}")
+        if not self.gain > 0.0:
+            raise ValueError(f"gain must be positive, got {self.gain!r}")
+        self._filter = InletFilter(self.inlet_lag)
+        self._levels = LocalLevelFilter(self.inlet_lag)
+        self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
+        if self.beta0 is not None:
+            self._beta = float(np.clip(self.beta0, 0.0, 1.0))
+        # Cache the speed line and its log-PR slope once. Neither depends on the
+        # solver state, and `np.gradient` on the densified β grid is the same
+        # piecewise-linear derivative the lookups themselves use.
+        _, wc, pr, _, _ = self.beta_map._speed_line(self.corrected_speed)
+        self._beta_grid = np.asarray(self.beta_map.beta, float)
+        self._wc_line = wc
+        self._dlnpr = np.gradient(np.log(pr), self._beta_grid)
+
+    @property
+    def beta(self) -> float:
+        """Current map position — the disk's internal state."""
+        return self._beta
+
+    @property
+    def reversals(self) -> int:
+        """Evaluations skipped because the sampled station had reverse flow."""
+        return self._reversals
+
+    @property
+    def clamps(self) -> int:
+        """Steps whose β update had to be clipped back into ``[0, 1]``.
+
+        Non-zero means the closure asked for a point off the end of the speed
+        line. A handful during startup is ordinary; a count that keeps rising at
+        convergence means the demanded operating point is not on the map.
+        """
+        return self._clamps
+
+    @property
+    def response_time(self) -> float:
+        """``tau`` actually in use [s], including the derived default."""
+        return self._tau
+
+    def __call__(self, solver: Solver) -> np.ndarray:
+        from .analytic import static_from_stagnation
+        from .maps import P_REF, T_REF
+
+        gas = solver.gas
+        grid = solver.grid
+        n = grid.n_interior
+        last_cell = self.cell + self.n_smear - 1
+        if self.cell - self.sample_offset < 0 or last_cell >= n:
+            raise ValueError(
+                f"disk at cell {self.cell} spanning {self.n_smear} cells with sample_offset "
+                f"{self.sample_offset} does not fit in {n} interior cells"
+            )
+        area = float(grid.a_face[self.cell])
+        if not np.all(grid.a_face[self.cell : last_cell + 2] == area):
+            raise ValueError("area varies across the disk cells; see PLAN.md §4.5")
+
+        idx = self.cell - self.sample_offset
+        st = solver.station_state_at(idx)
+        T = st.p / (st.rho * gas.R)
+        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
+        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
+        p01 = st.p * (T01 / T) ** gas.g_over_gm1
+        W = solver.mass_flux_at(idx)
+
+        if W <= 0.0:
+            self._reversals += 1
+            self.last = MappedDiskState(W=W, T01=T01, p01=p01)
+            return np.zeros((3, n))
+
+        T01, p01, W = self._filter.update(solver.t, T01, p01, W)
+        theta, delta = T01 / T_REF, p01 / P_REF
+        Wc = W * math.sqrt(theta) / delta
+
+        if math.isnan(self._t_prev):
+            if math.isnan(self._beta):
+                self._beta = 0.5
+            self._t_prev = solver.t
+            row = float(grid.x_face[last_cell + 1] - grid.x_face[self.cell])
+            self._tau = self.tau if self.tau is not None else row / max(st.u, 1e-9)
+        elif solver.t > self._t_prev:
+            # Advance once per *step*, not once per Runge-Kutta stage.
+            dt = solver.t - self._t_prev
+            self._t_prev = solver.t
+            wc_b = float(np.interp(self._beta, self._beta_grid, self._wc_line))
+            slope = float(np.interp(self._beta, self._beta_grid, self._dlnpr))
+            step = -self.gain * (Wc / wc_b - 1.0) / slope
+            nb = self._beta + (1.0 - math.exp(-dt / self._tau)) * step
+            if nb < 0.0 or nb > 1.0:
+                self._clamps += 1
+            self._beta = min(1.0, max(0.0, nb))
+
+        point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
+        dh0 = point.corrected_work * theta
+        T02 = T01 + dh0 / gas.cp
+        p02 = point.PR * p01
+
+        st1 = static_from_stagnation(T01, p01, W, area, gas)
+        st2 = static_from_stagnation(T02, p02, W, area, gas)
+        Fx = (st2.p - st1.p) * area + W * (st2.u - st1.u)
+        SWx = W * dh0
+
+        self.last = MappedDiskState(
+            phi1=W * math.sqrt(gas.R * T01) / (area * p01),
+            W=W,
+            T01=T01,
+            p01=p01,
+            PR=point.PR,
+            eta=point.efficiency,
+            Fx=Fx,
+            SWx=SWx,
+            beta=self._beta,
+            corrected_speed=self.corrected_speed,
+            ecmf=point.ecmf,
+            Wc=Wc,
+            corrected_work=point.corrected_work,
+            M2=st2.M,
+            T02=T02,
+        )
+
+        q = np.zeros((3, n))
+        span = slice(self.cell, self.cell + self.n_smear)
+        if self.similarity_scaling:
+            # See `InletFlowCompressor`: lag the dimensionless operating point,
+            # never the dimensional level, and read the level one cell upstream
+            # of each forced cell (`PLAN.md` §3.18, §3.20).
+            ref = slice(self.cell - 1, self.cell + self.n_smear - 1)
+            p_now = solver.p[1:-1][ref]
+            m_now = solver.cv[1, 1:-1][ref]
+            p_ref, m_ref = self._levels.update(solver.t, p_now, m_now)
+            q[1, span] = Fx * self._weights * (p_now / p_ref)
+            q[2, span] = SWx * self._weights * (m_now / m_ref)
+        else:
+            q[1, span] = Fx * self._weights
+            q[2, span] = SWx * self._weights
         return q

@@ -26,14 +26,14 @@ monotonic. ``ECMF = Wc·√τ/PR`` is monotonic everywhere and spans 72–163%.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
 from .gas import PerfectGas
 
-__all__ = ["BetaMap", "MapPoint", "load_beta_map"]
+__all__ = ["BetaMap", "MapPoint", "ScaledMap", "load_beta_map"]
 
 #: Standard-day reference used by the corrected parameters in these maps.
 T_REF = 288.15
@@ -315,6 +315,68 @@ class BetaMap:
 
         gas = gas or self.gas
         return float(self.Wc.max() * math.sqrt(gas.R * T_REF) / (max_flow_function(gas) * P_REF))
+
+
+@dataclass(frozen=True)
+class ScaledMap:
+    """The same map shape, sized for a stage with a different inlet flow.
+
+    A multistage machine cannot use one map for every stage. With a fixed ``W``,
+    stage *k* sees ``Wc = W√θ_k/δ_k``; across a stage of ``PR ≈ 2``, ``δ``
+    doubles while ``√θ`` rises about 12%, so ``Wc`` roughly halves per stage and
+    leaves the tabulated range after two of them. That is not a modelling
+    artefact — it is why the stages of a real compressor are different machines,
+    each sized to its own inlet corrected flow.
+
+    The standard device is **stage stacking**: give every stage the same map
+    shape scaled to its own inlet, which also puts every stage at the same
+    relative position on its speed line, i.e. a repeating-stage machine.
+
+    ``scale`` is this stage's design corrected flow divided by the reference
+    map's, so stage 1 has ``scale = 1``. Lookups divide by it and the returned
+    flow quantities are multiplied back, so ``MapPoint.Wc`` and ``.ecmf`` stay
+    in the stage's own units while ``PR``, ``corrected_work``, ``efficiency``
+    and ``beta`` — all dimensionless and all invariant to the sizing — pass
+    through untouched.
+    """
+
+    inner: BetaMap
+    scale: float
+
+    def __post_init__(self) -> None:
+        if not self.scale > 0.0:
+            raise ValueError(f"scale must be positive, got {self.scale!r}")
+
+    @property
+    def name(self) -> str:
+        return f"{self.inner.name}×{self.scale:.4g}"
+
+    @property
+    def beta(self) -> np.ndarray:
+        return self.inner.beta
+
+    @property
+    def corrected_speed(self) -> np.ndarray:
+        return self.inner.corrected_speed
+
+    def _rescale(self, p: MapPoint) -> MapPoint:
+        return replace(p, Wc=p.Wc * self.scale, ecmf=p.ecmf * self.scale)
+
+    def _speed_line(self, corrected_speed: float) -> tuple[np.ndarray, ...]:
+        e, wc, pr, cw, eff = self.inner._speed_line(corrected_speed)
+        return (e * self.scale, wc * self.scale, pr, cw, eff)
+
+    def evaluate_at_Wc(self, Wc: float, corrected_speed: float) -> MapPoint:
+        return self._rescale(self.inner.evaluate_at_Wc(Wc / self.scale, corrected_speed))
+
+    def evaluate_at_ecmf(self, ecmf: float, corrected_speed: float) -> MapPoint:
+        return self._rescale(self.inner.evaluate_at_ecmf(ecmf / self.scale, corrected_speed))
+
+    def evaluate_at_beta(self, beta: float, corrected_speed: float) -> MapPoint:
+        return self._rescale(self.inner.evaluate_at_beta(beta, corrected_speed))
+
+    def inlet_closure_is_invertible(self, corrected_speed: float) -> bool:
+        return self.inner.inlet_closure_is_invertible(corrected_speed)
 
 
 def load_beta_map(path: str | Path, gas: PerfectGas, name: str | None = None) -> BetaMap:
