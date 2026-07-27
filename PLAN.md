@@ -1189,6 +1189,126 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.37 A clamped map end *is* a surge condition, and the library closes at 292/315
+
+**The convention, measured, because it was being used backwards.** On all four
+compressor maps `Wc` and ECMF both **fall** with β: β = 1 is the low-flow,
+high-PR end — **surge** — and β = 0 is choke. The sweep grid's `f`, however, is a
+fraction along the **ECMF range** (`_speed_line(nc)[0]` is ECMF, not β), so
+
+> **`f` ≈ 1 − β. `f` = 0.0 is the surge end; `f` = 1.0 is choke.**
+
+Every `f` in §3.30–§3.36 is correct as written. Summaries that re-expressed those
+columns "in β" inverted them, and §3.27 and §3.30 each carried one such sentence;
+both are fixed above. Recorded because the error is silent — surge and choke both
+sit at a table end, so an inverted label still points at a failing column.
+
+**The mechanism.** `np.interp` clamps, so outside the table the characteristic is
+**flat**. A flat characteristic is exactly the zero-restoring-force condition
+§3.34 identifies as surge — so a clamped lookup *manufactures* an artificial
+surge at every table end, and any point that wanders out is pinned there rather
+than pushed back. §3.34 saw the step and blamed the map's missing data; the
+missing data is not the problem, the missing *gradient* is.
+
+Holding the terminal slope for one speed-line width past each end, `HighPqPCompr`:
+
+| | Nc 0.950 f = 0.0 | Nc 0.950 f = 1.0 | Nc 1.025 f = 0.0 | Nc 1.025 f = 1.0 |
+| --- | --- | --- | --- | --- |
+| clamped | −7.54e−02 | +2.08e−03 | −2.3e−01 | +5.3e−03 |
+| slope held | **−1.03e−10** | **−2.39e−11** | **+3.04e−11** | **+1.74e−10** |
+
+Bounded at one width because §3.8's finding still governs the *value*; it is the
+gradient the near field needs. The bound is invisible to a converging run — six
+cells reproduce the unbounded result exactly — and it keeps the far field from
+being a different way to return a wrong number confidently.
+
+**The library, complete:**
+
+| map | before today | §3.32 | §3.36 | **§3.37** |
+| --- | --- | --- | --- | --- |
+| `SubsonicCompressor` | 80/84 | 84/84 | 84/84 | **84/84** |
+| `TranssonicCompressor` | 20/45, five lines unbuildable | 63/63 | 63/63 | **63/63** |
+| `HighPqPCompr` | 21/70 | 46/70 | 56/70 | **70/70** |
+| `TwoStgRadialCompr` | — | 68/98 | 69/98 | **75/98** |
+| **total** | — | 261/315 | 272/315 | **292/315 (92.7%)** |
+| on lines the inverse refuses | 0/91 | 64/91 | 75/91 | **90/91 (99%)** |
+
+`HighPqPCompr` holds **every cell of every speed line, to PR 28.889**, against a
+project ceiling of 14.972 this morning.
+
+**Why the radial does not, and why that is not a defect.** The two maps respond
+oppositely because their data ends in different places:
+
+| map | β = 1 at the PR peak | past it |
+| --- | --- | --- |
+| `HighPqPCompr` | **10 / 10 lines** | 0 |
+| `TwoStgRadialCompr` | 2 / 14 | **12** |
+
+`HighPqPCompr` stops exactly at surge, so its flat end was purely an artefact —
+remove it and the map completes. `TwoStgRadialCompr` is tabulated 0.3–3.4% *past*
+its own peak on 12 of 14 lines, so its surge-side columns have `dPR/dECMF ≥ 0`.
+The clamp had been flattening that into false passes. Slope sign against outcome,
+all 98 cells:
+
+| | count |
+| --- | --- |
+| slope ≥ 0 and failed | 17 |
+| slope < 0 and held | 74 |
+| slope ≥ 0 but held | 1 |
+| slope < 0 but failed | 6 |
+
+**91 of 98 classified by slope sign alone.** Of the six it misses, three are the
+`densify` cells below and three are `f` = 0.15 cells whose slope is negative but
+roughly half their neighbours' — §3.34's "too flat to restore". The control is
+clean: Nc 1.070 and 1.100, the only two lines whose data stops at the peak, are
+**7/7 both**. So 20 of the radial's 23 failures are the model correctly refusing
+a statically unstable branch, and closing them would mean truncating the supplied
+map at its peak or modelling surge dynamics — not fixing a bug.
+
+**The β-resolution cells, now measured rather than extrapolated.** §3.36 asserted
+`densify` 72 would clear them from §3.30's series. Run directly:
+
+| cell | d18 | d36 | **d72** |
+| --- | --- | --- | --- |
+| Nc 0.600 f 0.65 | 7.07e−06 | 1.25e−06 | **4.51e−07** |
+| Nc 0.600 f 0.85 | 4.94e−06 | 2.12e−06 | **7.17e−07** |
+| Nc 0.650 f 0.65 | 3.12e−06 | 1.14e−06 | **1.59e−07** |
+
+Monotone in every cell, mean order ≈ 1.8, all three inside the gate at 72.
+
+**And `densify` 72 is now free**, which it was not when §3.36 advised against it.
+`evaluate` slices a column six times per call; on a C-ordered array that slice is
+strided, so numpy copied the whole speed line before interpolating — the lookup
+was O(n_key) in a memcpy, not O(log n_key) in a search. Fortran order makes it a
+contiguous view:
+
+| | densify 36 | densify 72 |
+| --- | --- | --- |
+| `HighPqPCompr` | 35.3 → **26.0 µs** | 107.3 → **25.2 µs** |
+| `TwoStgRadialCompr` | 62.4 → **26.5 µs** | 180.8 → **25.7 µs** |
+
+Flat in grid size instead of linear in it, values bit-identical. The earlier
+recommendation against 72 was right for the old layout and wrong for this one.
+
+**What `off_table` now means.** §3.34 held that a converged run with a non-zero
+count was not to be trusted, because a count meant pinning. It no longer does:
+the four cells above converge at 1e−10 to 1e−11 while logging 1281 to 12442
+excursions each. Leaving the table during the transient is now normal and
+expected; the counter records that it happened, and nothing more.
+
+**Open, and what each is worth.** Three turbine maps still fail to load and a
+fourth — `MediumPqPTurbine` — loads *silently corrupt*: at PR 1.0642 with
+η = −0.0339 the loader derives −153,401 J/kg against an ideal Δh₀ of ≈ 5,190,
+implying a 53% temperature drop across a 6% pressure ratio, and passes the τ > 0
+check on magnitude alone. The cause is not inlet conditions — `T_REF` cancels
+exactly out of `τ = 1 + (PR^k − 1)/η` — but that the loader applies compressor
+thermodynamics to turbines: `Δh₀ˢ = cp·T_ref·(PR^k − 1)` is the compression
+relation, `work = ideal/η` is the compression convention, and the docstring's
+justification for not special-casing η ≤ 0 ("the numerator changes sign with the
+denominator") holds on 12 of 12 compressor cells and fails on **35 of 36 turbine
+cells**. That, plus keying turbines on PR — monotone on 22/22 lines where ECMF
+manages 7/22 — is the turbine work, and it is larger than it looked.
+
 ### 3.36 The exit station was reading across the source jump — one cell fixed it
 
 §3.35 measures the exit station under-reading ECMF by 4.6% at PR 4 and 35% at
@@ -1290,9 +1410,9 @@ twelfth having never failed under any configuration.)*
 
 | count | what | status |
 | --- | --- | --- |
-| **32** | off-table clamp at the exact table ends — 18 at f = 0.0, 14 at f = 1.0 | §3.34 diagnosed it and showed 1% inside the table gives −7.5e−02 → +4.1e−08. **That fix is not applied.** These are the PR residuals still visible in every table above. |
+| **32** | called "off-table clamp at the exact table ends" — 18 at f = 0.0, 14 at f = 1.0 | **This grouping is wrong; §3.37 splits it.** 14 are a clamp artefact and are now fixed; the rest are the radial's unstable branch and are correct failures. |
 | 8 | radial f = 0.15, past the PR peak — 7 deaths and one −7.2e−01 | correct physics, not a defect |
-| 3 | map β-resolution near-misses, ~1e−06 (Nc 0.600/0.650, f = 0.65/0.85) | order 2.18 in `densify`; 72 clears them |
+| 3 | map β-resolution near-misses, ~1e−06 (Nc 0.600/0.650, f = 0.65/0.85) | confirmed in §3.37 by measurement rather than extrapolation |
 
 Counted, not estimated. An earlier draft of this table said ~28 / 7 / 3 / ~5, splitting
 the clamp across two rows and filing the −7.2e−01 surge cell under the clamp; the
@@ -1761,8 +1881,10 @@ its failures are excursions. That is a genuine regression in the near-choke band
 bought in exchange for the 13 speed lines that previously could not be run at
 all. Both trades are on the table and neither is free.
 
-**The β = 1 column holds, and that is still the diagnosis.** At *exactly* the
-choke end the point holds on every map — 37 such cells, no exceptions — `HighPqPCompr` PR 3.149, `TwoStgRadialCompr`
+**The choke-end column holds, and that is still the diagnosis.** At *exactly*
+the choke end — β = 0, which is `f` = 1.0 in the sweep grid; see the convention
+note in §3.37, this sentence said "β = 1" until it was checked — the point holds
+on every map, 37 such cells, no exceptions — `HighPqPCompr` PR 3.149, `TwoStgRadialCompr`
 PR 1.759, `TranssonicCompressor` PR 1.441. The same duct, the same pressure
 ratio, the same mesh, 0.5% away in flow, fails. The only difference is that at
 the end of the line β is pinned by the clamp and has no freedom, and 0.5% inside
@@ -1925,11 +2047,14 @@ shows the closure is inert where it was put; with them it shows the fixed point
 ### 3.27 The full-map sweep, and surge as a correct failure
 
 225 operating points: four maps, every tabulated speed line, positions 0.15 to
-0.85 along each line, plus the **β = 0 and β = 1 ends** — surge and choke — which
-an earlier grid had avoided and which are the points worth having a map for.
+0.85 along each line, plus the **β = 0 and β = 1 ends** — choke and surge
+respectively (§3.37; this read "surge and choke" until the convention was
+measured) — which an earlier grid had avoided and which are the points worth
+having a map for.
 
 **The extremes are not a problem.** `SubsonicCompressor` holds **24/24** at
-β = 0 and β = 1, every speed line, up to PR 3.082 at surge and 2.133 at choke.
+β = 0 and β = 1, every speed line, up to PR 3.082 at surge (β = 1) and 2.133 at
+choke (β = 0).
 `TranssonicCompressor` holds **8/8** on its four invertible lines. Wherever the
 closure can be evaluated at all, the tabulated ends behave like the interior.
 
