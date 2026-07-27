@@ -1189,7 +1189,57 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.25 Re-measuring the open failures — most of them were already fixed
+
+§3.19 left two failures open on `HPC01`: a near-choke limit cycle, and startup
+deaths at Nc ≥ 1.0. Both were measured with the closure as it stood then —
+cell-centred station sampling, the similarity reference read from the *forced*
+cell, `n_smear` = 21, `sample_offset` = 12. All four have since changed (§3.20,
+§3.23), so the numbers were stale. Re-measuring cost minutes; fixing what is
+already fixed would have cost days.
+
+Current closure, `n_smear` = 1, `sample_offset` = 2, residual convergence:
+
+| Nc | position in `Wc` | PR | §3.19 said | now |
+| --- | --- | --- | --- | --- |
+| 0.80 | 0.582 | 5.040 | held 1.4e−10 | HELD −1.202e−11 |
+| 0.80 | **0.869** | 4.436 | cycle 1.6e−02 | **HELD −2.491e−10** |
+| 0.90 | 0.710 | 7.424 | cycle 3.6e−03 | **HELD −3.646e−11** |
+| 0.90 | **0.925** | 5.991 | β clamped at 0 | **HELD −1.510e−10** |
+
+**The near-choke limit cycle is gone**, including at 92.5% along the speed line
+where β used to clamp. So §3.19's diagnosis — that this was the ICMF
+conditioning problem of §3.5 surfacing — was explaining a symptom that the
+closure fix removed. The conditioning statement about ICMF remains true; it was
+not what caused the cycle.
+
+**The Nc ≥ 1.0 "startup basin" was a smear-width problem.** With `n_smear` = 1
+those cases die at step 1–2 rather than 191–791, which is the seed being
+non-physical on contact rather than a dynamic instability — and no wonder, since
+it asks *one node* for PR 9.45 against a demonstrated single-node capability of
+PR 5.04. Widening it:
+
+| Nc | PR | `n_smear` 1 | `n_smear` 7 | `n_smear` 21 |
+| --- | --- | --- | --- | --- |
+| 1.00 | 9.454 | died 2 | **HELD −4.736e−12** | not conv. −2.18e−02 |
+| 1.05 | 10.162 | died 1 | died 12984 | died 335 |
+
+**`n_smear` is non-monotonic**, which §3.20 already saw at Nc 0.8 (1 holds, 3
+dies, 21 holds) and is still unexplained. The practical form: **~7 cells is the
+sweet spot at high pressure ratio**, and both extremes are worse. One node is
+right up to about PR 5; beyond that it wants a few.
+
+**What is actually still open:** Nc 1.05, PR 10.162 — the top speed line — fails
+at every smear width tried. That is now the only surviving failure from §3.19.
+
 ### 3.19 The residual limit cycle is the ICMF conditioning problem, not the closure
+
+> **Superseded by §3.25.** The cycle described here does not reproduce with
+> the current closure — Nc 0.8 at 87% along the speed line now holds to
+> −2.5e−10, and Nc 0.9 at 92.5%, where β clamped, holds to −1.5e−10. The
+> measurements below are sound and the ICMF conditioning statement is still
+> true; the diagnosis linking the two was explaining a symptom that §3.18
+> and §3.20 removed.
 
 With the scaling in place, `HPC01` at Nc 0.7 (PR 3.104) converges to a mean
 offset of **+6.27e−11** with 1.02e−07 peak-to-peak. Nc 0.8 does not: it settles
