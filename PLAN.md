@@ -1076,6 +1076,39 @@ sample. The one piece of evidence already pointing that way is that
 flux-weighted heat — the only genuinely local variant tried — is also the only
 one that improved every speed.
 
+### 3.17 Implicit integration — what it buys, and what it cannot
+
+Backward Euler, BDF2 and variable-step SDIRK3 (Alexander's L-stable, stiffly
+accurate three-stage scheme), all Newton–Krylov and matrix-free because the
+source is non-local and the Jacobian is therefore not block-tridiagonal.
+
+Measured temporal order against a finely-stepped reference, halving `dt`:
+
+| scheme | rates, coarse → fine | with reconstruction forced 1st order |
+| --- | --- | --- |
+| backward Euler | 0.39, 0.54, 0.69, 0.81 | 0.87 |
+| BDF2 | 0.71, 0.97, 1.27, 1.63 | 2.06 |
+| SDIRK3 | 1.62, 2.21, 2.68, 2.89 | 2.97 |
+
+Each reaches its design order, and the approach is slow because the van Albada
+limiter is only piecewise differentiable — until the step is small enough that
+no face changes limiter branch during it, every scheme reads one order low. The
+first-order column is what identifies the limiter as the cause rather than a
+coefficient slip, and it is why `tests/test_implicit.py` measures order at
+n = 16, 32, 64 rather than 4, 8, 16.
+
+**What it buys.** Freedom from the CFL limit on the stable range: 50× the
+explicit step from a perturbed state, and a residual driven to round-off in tens
+of steps rather than tens of thousands. `ImplicitStepper` is also the natural
+place to converge a design point before a stability measurement.
+
+**What it cannot buy.** The high-PR blockage. §3.16 shows the target is a
+repeller, and an A-stable scheme integrating toward a repeller still leaves it —
+A-stability bounds the response to *stable* modes and says nothing about
+unstable ones. Backward Euler getting 5× further in physical time than explicit
+was never evidence of progress; it was a slower walk down the same unstable
+manifold.
+
 ### 3.18 The fix: lag the operating point, never the level
 
 §3.16 leaves one question: what closure is both statically stable *and* free of
@@ -1155,6 +1188,93 @@ scaled **holds at +3.69e−10 with 5.1e−11 drift**. That case is now the gate 
 On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
+
+### 3.19 The residual limit cycle is the ICMF conditioning problem, not the closure
+
+With the scaling in place, `HPC01` at Nc 0.7 (PR 3.104) converges to a mean
+offset of **+6.27e−11** with 1.02e−07 peak-to-peak. Nc 0.8 does not: it settles
+into a sustained oscillation of ±8e−3 in mass flow. Since the linearisation
+there is −38.96, the cycle is nonlinear, and four hypotheses were tested and
+killed before the right one:
+
+| hypothesis | test | result |
+| --- | --- | --- |
+| filter dynamics set the period | sweep `τ` | period 2.95e−3 s, **0.29 τ** — not the filter |
+| duct resonance, exit reflection | absorbing outlet, σ = 0.2, 0.5 | 1.65e−02, 1.69e−02 against 1.63e−02 — no effect |
+| duct resonance, inlet reflection | absorbing inlet, σ = 0.2 | 1.63e−02 — **no effect at all** |
+| constant area starves the exit | contract to `M2` = 0.30 (`A2/A1` = 0.404) | 1.94e−02 — slightly *worse* |
+
+The period does match `2 × 0.5 / 340 = 2.9e−3 s`, the acoustic round trip of the
+half-duct between inlet and disk, but making either end absorbing changes
+nothing, so the resonance is a symptom and not the driver.
+
+**What it actually is: the design point sat next to choke.** Every rig here
+designs at the midpoint of the speed line's *ECMF* range, and ECMF is a strongly
+nonlinear function of `Wc`, so the two midpoints are not the same point. At
+Nc 0.8 the line spans `Wc` ∈ [17.39, 23.60] and mid-ECMF lands at `Wc` = 22.785
+— **87% of the way to choke, with 3.6% of margin**. The closure inverts *inlet*
+`Wc`, so that is the margin that governs. Moving along the line, at Nc 0.8:
+
+| position in `Wc` | PR | peak-to-peak in W | mean offset |
+| --- | --- | --- | --- |
+| 0.582 | **5.040** | **6.23e−10** | **+1.40e−10** |
+| 0.764 | 4.762 | 9.00e−05 | −4.10e−08 |
+| 0.87 (mid-ECMF) | 4.436 | 1.63e−02 | −3.56e−04 |
+
+**PR 5.04 holds to 1.4e−10.** The degradation is smooth and monotone in
+proximity to choke, which identifies it as the conditioning problem §3.5 already
+recorded from the other side: ICMF compresses the whole β range into 3–10% of
+mass flow above 72% speed, so near choke the closure inverts a nearly vertical
+curve. `InletFlowCompressor` keys on inlet `Wc` deliberately — keying on *exit*
+corrected flow closes an algebraic loop through the source's own output, with
+measured gain 0.90–1.10 — so this is the price of that choice, and it is only
+paid near the choke end.
+
+The same effect fully saturated is the `beta` = 0.0000 clamping seen at Nc 0.9,
+with `PR` pinned at the line's end value 4.6161. That is "suspect 1" returning,
+for a reason now understood.
+
+**Where the ceiling is now.** Sweeping the top speeds at a comfortable margin:
+
+| Nc | PR | position in `Wc` | result |
+| --- | --- | --- | --- |
+| 0.7 | 3.104 | 0.5 | **held, 6.27e−11** |
+| 0.8 | **5.040** | 0.582 | **held, 1.40e−10** |
+| 0.8 | 4.762 | 0.764 | 9.0e−05 cycle |
+| 0.9 | 7.424 | 0.710 | survives, 3.6e−03 cycle |
+| 0.9 | 6.771 | 0.853 | dies at step 2023 |
+| 1.0 | 9.454 | 0.689 | dies at step 791 |
+| 1.05 | 10.162 | **0.319** | dies at step 189 |
+
+Two *different* remaining failures, and they must not be conflated:
+
+1. **Near-choke cycling**, above roughly 0.75 of the `Wc` range — the
+   conditioning problem above. It degrades smoothly and predictably.
+2. **A startup failure at Nc ≥ 1.0**, which is not that: at Nc 1.05 the design
+   point sits at 0.319 of the range, nowhere near choke, and the run still dies
+   in 189 steps. The linearised design state at Nc 1.0 is **−19.1**, i.e.
+   stable, so this is a *basin* problem — the flux-integrated seed is an exact
+   steady state of the continuous equations but not of the discrete ones, and at
+   PR 9+ the startup transient is large enough to leave the basin.
+
+For (2) the tool is pseudo-transient continuation with `ImplicitStepper`, which
+is half-built: Newton stops converging near dt = 5.6e−2 s because the
+preconditioner is diagonal (§3.17). The continuation *ramp* is not the tool —
+bringing the source up from zero against a back pressure sized for full PR blows
+up at steps 286 and 334 where starting at full strength survives.
+
+**Also open.** A first attempt to put `LocalLevelFilter`'s states into the
+eigenvalue problem disagreed with its own validated frozen limit (+37.0 against
+−38.96 at Nc 0.8) and is therefore **wrong**; its numbers are recorded nowhere,
+and the rig needs fixing before the level filter's dynamics can be analysed.
+
+**The continuation ramp is the wrong tool for the startup.** Bringing the source
+up from zero against a back pressure sized for full PR blows up at steps 286 and
+334 where starting at full strength survives — the weak-source state is nowhere
+near the design point and has to travel back. Pseudo-transient continuation with
+the implicit stepper is the better route and is only half-built: Newton stops
+converging near dt = 5.6e−2 s (~2600 CFL steps) because the preconditioner is
+diagonal, which is exactly the limitation §3.17 records.
 
 ### 3.20 The whole pressure ratio in one node — shift the reference upstream
 
@@ -1277,126 +1397,6 @@ peak-to-peak is still comparable to their mean at 30,000 steps, so they are not
 converged and **must not be reported as held**. A 12-stage train took ~50,000
 steps to settle in the earlier trace; the convergence run is what decides whether
 staged OPR 30 meets the 1e−6 gate.
-
-### 3.19 The residual limit cycle is the ICMF conditioning problem, not the closure
-
-With the scaling in place, `HPC01` at Nc 0.7 (PR 3.104) converges to a mean
-offset of **+6.27e−11** with 1.02e−07 peak-to-peak. Nc 0.8 does not: it settles
-into a sustained oscillation of ±8e−3 in mass flow. Since the linearisation
-there is −38.96, the cycle is nonlinear, and four hypotheses were tested and
-killed before the right one:
-
-| hypothesis | test | result |
-| --- | --- | --- |
-| filter dynamics set the period | sweep `τ` | period 2.95e−3 s, **0.29 τ** — not the filter |
-| duct resonance, exit reflection | absorbing outlet, σ = 0.2, 0.5 | 1.65e−02, 1.69e−02 against 1.63e−02 — no effect |
-| duct resonance, inlet reflection | absorbing inlet, σ = 0.2 | 1.63e−02 — **no effect at all** |
-| constant area starves the exit | contract to `M2` = 0.30 (`A2/A1` = 0.404) | 1.94e−02 — slightly *worse* |
-
-The period does match `2 × 0.5 / 340 = 2.9e−3 s`, the acoustic round trip of the
-half-duct between inlet and disk, but making either end absorbing changes
-nothing, so the resonance is a symptom and not the driver.
-
-**What it actually is: the design point sat next to choke.** Every rig here
-designs at the midpoint of the speed line's *ECMF* range, and ECMF is a strongly
-nonlinear function of `Wc`, so the two midpoints are not the same point. At
-Nc 0.8 the line spans `Wc` ∈ [17.39, 23.60] and mid-ECMF lands at `Wc` = 22.785
-— **87% of the way to choke, with 3.6% of margin**. The closure inverts *inlet*
-`Wc`, so that is the margin that governs. Moving along the line, at Nc 0.8:
-
-| position in `Wc` | PR | peak-to-peak in W | mean offset |
-| --- | --- | --- | --- |
-| 0.582 | **5.040** | **6.23e−10** | **+1.40e−10** |
-| 0.764 | 4.762 | 9.00e−05 | −4.10e−08 |
-| 0.87 (mid-ECMF) | 4.436 | 1.63e−02 | −3.56e−04 |
-
-**PR 5.04 holds to 1.4e−10.** The degradation is smooth and monotone in
-proximity to choke, which identifies it as the conditioning problem §3.5 already
-recorded from the other side: ICMF compresses the whole β range into 3–10% of
-mass flow above 72% speed, so near choke the closure inverts a nearly vertical
-curve. `InletFlowCompressor` keys on inlet `Wc` deliberately — keying on *exit*
-corrected flow closes an algebraic loop through the source's own output, with
-measured gain 0.90–1.10 — so this is the price of that choice, and it is only
-paid near the choke end.
-
-The same effect fully saturated is the `beta` = 0.0000 clamping seen at Nc 0.9,
-with `PR` pinned at the line's end value 4.6161. That is "suspect 1" returning,
-for a reason now understood.
-
-**Where the ceiling is now.** Sweeping the top speeds at a comfortable margin:
-
-| Nc | PR | position in `Wc` | result |
-| --- | --- | --- | --- |
-| 0.7 | 3.104 | 0.5 | **held, 6.27e−11** |
-| 0.8 | **5.040** | 0.582 | **held, 1.40e−10** |
-| 0.8 | 4.762 | 0.764 | 9.0e−05 cycle |
-| 0.9 | 7.424 | 0.710 | survives, 3.6e−03 cycle |
-| 0.9 | 6.771 | 0.853 | dies at step 2023 |
-| 1.0 | 9.454 | 0.689 | dies at step 791 |
-| 1.05 | 10.162 | **0.319** | dies at step 189 |
-
-Two *different* remaining failures, and they must not be conflated:
-
-1. **Near-choke cycling**, above roughly 0.75 of the `Wc` range — the
-   conditioning problem above. It degrades smoothly and predictably.
-2. **A startup failure at Nc ≥ 1.0**, which is not that: at Nc 1.05 the design
-   point sits at 0.319 of the range, nowhere near choke, and the run still dies
-   in 189 steps. The linearised design state at Nc 1.0 is **−19.1**, i.e.
-   stable, so this is a *basin* problem — the flux-integrated seed is an exact
-   steady state of the continuous equations but not of the discrete ones, and at
-   PR 9+ the startup transient is large enough to leave the basin.
-
-For (2) the tool is pseudo-transient continuation with `ImplicitStepper`, which
-is half-built: Newton stops converging near dt = 5.6e−2 s because the
-preconditioner is diagonal (§3.17). The continuation *ramp* is not the tool —
-bringing the source up from zero against a back pressure sized for full PR blows
-up at steps 286 and 334 where starting at full strength survives.
-
-**Also open.** A first attempt to put `LocalLevelFilter`'s states into the
-eigenvalue problem disagreed with its own validated frozen limit (+37.0 against
-−38.96 at Nc 0.8) and is therefore **wrong**; its numbers are recorded nowhere,
-and the rig needs fixing before the level filter's dynamics can be analysed.
-
-**The continuation ramp is the wrong tool for the startup.** Bringing the source
-up from zero against a back pressure sized for full PR blows up at steps 286 and
-334 where starting at full strength survives — the weak-source state is nowhere
-near the design point and has to travel back. Pseudo-transient continuation with
-the implicit stepper is the better route and is only half-built: Newton stops
-converging near dt = 5.6e−2 s (~2600 CFL steps) because the preconditioner is
-diagonal, which is exactly the limitation §3.17 records.
-
-### 3.17 Implicit integration — what it buys, and what it cannot
-
-Backward Euler, BDF2 and variable-step SDIRK3 (Alexander's L-stable, stiffly
-accurate three-stage scheme), all Newton–Krylov and matrix-free because the
-source is non-local and the Jacobian is therefore not block-tridiagonal.
-
-Measured temporal order against a finely-stepped reference, halving `dt`:
-
-| scheme | rates, coarse → fine | with reconstruction forced 1st order |
-| --- | --- | --- |
-| backward Euler | 0.39, 0.54, 0.69, 0.81 | 0.87 |
-| BDF2 | 0.71, 0.97, 1.27, 1.63 | 2.06 |
-| SDIRK3 | 1.62, 2.21, 2.68, 2.89 | 2.97 |
-
-Each reaches its design order, and the approach is slow because the van Albada
-limiter is only piecewise differentiable — until the step is small enough that
-no face changes limiter branch during it, every scheme reads one order low. The
-first-order column is what identifies the limiter as the cause rather than a
-coefficient slip, and it is why `tests/test_implicit.py` measures order at
-n = 16, 32, 64 rather than 4, 8, 16.
-
-**What it buys.** Freedom from the CFL limit on the stable range: 50× the
-explicit step from a perturbed state, and a residual driven to round-off in tens
-of steps rather than tens of thousands. `ImplicitStepper` is also the natural
-place to converge a design point before a stability measurement.
-
-**What it cannot buy.** The high-PR blockage. §3.16 shows the target is a
-repeller, and an A-stable scheme integrating toward a repeller still leaves it —
-A-stability bounds the response to *stable* modes and says nothing about
-unstable ones. Backward Euler getting 5× further in physical time than explicit
-was never evidence of progress; it was a slower walk down the same unstable
-manifold.
 
 ### 3.4 Measured cost of the alternatives
 
