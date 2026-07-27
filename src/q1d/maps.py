@@ -70,6 +70,13 @@ class BetaMap:
     corrected_work: np.ndarray
     ecmf: np.ndarray
     gas: PerfectGas
+    #: ``"compressor"`` or ``"turbine"``. Sets the sign of ``corrected_work``
+    #: and which isentropic relation produced it, so it is not cosmetic.
+    kind: str = "compressor"
+    #: ``(β, speed)`` indices whose ``η`` was non-positive in the workbook and
+    #: was interpolated from neighbours along β. Empty on every compressor map
+    #: supplied; non-empty on four of the six turbines.
+    repaired_efficiency: tuple[tuple[int, int], ...] = ()
 
     # -- diagnostics --------------------------------------------------------
 
@@ -589,20 +596,64 @@ class ECMFMap:
         )
 
 
-def load_beta_map(path: str | Path, gas: PerfectGas, name: str | None = None) -> BetaMap:
+def _infer_kind(Wc: np.ndarray, PR: np.ndarray) -> str:
+    """Compressor or turbine, from the sign of ``dWc/dPR`` along each line.
+
+    A compressor throttled toward surge passes *less* flow at *more* pressure
+    ratio; a turbine passes *more* flow as the expansion ratio opens up, until
+    it chokes. So the sign of ``dWc/dPR`` separates them, and on the seventeen
+    supplied workbooks it does so unanimously — positive on **64 of 64** turbine
+    speed lines and negative on **109 of 109** compressor lines, no map mixed.
+
+    Preferred over the other available signal, which is that compressors carry a
+    ``surge_line`` sheet and turbines do not: that agrees on all seventeen too,
+    but it is a filing convention and this is the machine.
+    """
+    rising = 0
+    for j in range(PR.shape[1]):
+        order = np.argsort(PR[:, j])
+        d = np.diff(Wc[order, j])
+        rising += int(np.sum(d > 0.0) > np.sum(d < 0.0))
+    return "turbine" if rising * 2 > PR.shape[1] else "compressor"
+
+
+def load_beta_map(
+    path: str | Path,
+    gas: PerfectGas,
+    name: str | None = None,
+    kind: str | None = None,
+) -> BetaMap:
     """Read a workbook and derive corrected work and ECMF.
 
-    Corrected work is evaluated at the reference condition, where ``θ = 1``:
+    Corrected work is evaluated at the reference condition, where ``θ = 1``, and
+    is signed as the stagnation enthalpy change across the machine — positive
+    into a compressor, negative out of a turbine.
 
     .. math::
 
-        \\Delta h_0 = \\frac{h(T_{02s}) - h(T_{ref})}{\\eta},
-        \\qquad s^\\circ(T_{02s}) = s^\\circ(T_{ref}) + R\\ln PR
+        \\Delta h_0 = \\frac{h(T_{02s}) - h(T_{ref})}{\\eta}
+        \\quad\\text{(compressor)},
+        \\qquad
+        \\Delta h_0 = -\\eta\\,\\bigl(h(T_{ref}) - h(T_{02s})\\bigr)
+        \\quad\\text{(turbine)}
 
-    For a perfect gas this reduces to ``cp·T_ref·(PR^k − 1)/η``, and the
-    resulting ``CW`` is independent of ``T₀₁`` by construction. The singular
-    corner where ``η ≤ 0`` is *not* special-cased: ``Δh₀`` stays finite there
-    because the numerator changes sign with the denominator.
+    For a perfect gas these reduce to ``cp·T_ref·(PR^k − 1)/η`` and
+    ``−η·cp·T_ref·(1 − PR^−k)``, and the resulting ``CW`` is independent of
+    ``T₀₁`` by construction. **Both differences are load-bearing.** The
+    compressor form applied to a turbine gives a temperature *rise* — ``τ > 1``
+    for every cell of every supplied turbine map, where a PR 3, η 0.9 stage must
+    drop 24% — and it divides by η where a turbine multiplies, which is what
+    made three of the six turbine workbooks unloadable and a fourth silently
+    wrong (`PLAN.md` §3.38).
+
+    ``kind`` is inferred by :func:`_infer_kind` when not given.
+
+    An earlier version of this docstring claimed ``η ≤ 0`` needed no special
+    case, because ``Δh₀``'s numerator changes sign with its denominator. That
+    holds on **12 of 12** such compressor cells and fails on **35 of 36**
+    turbine cells, where η goes negative while PR stays above 1 and nothing
+    cancels. Those cells are now repaired from their neighbours along β and
+    listed in :attr:`BetaMap.repaired_efficiency`.
     """
     import pandas as pd
 
@@ -629,15 +680,68 @@ def load_beta_map(path: str | Path, gas: PerfectGas, name: str | None = None) ->
     if np.any(np.diff(speed) <= 0):
         raise ValueError(f"{name}: speed lines must be strictly increasing")
 
-    # Corrected work at theta = 1. Finite even where eta <= 0, because the
-    # isentropic enthalpy rise changes sign together with eta.
-    dh0s = gas.cp * T_REF * (PR**gas.gm1_over_g - 1.0)
-    corrected_work = dh0s / eff
+    if kind is None:
+        kind = _infer_kind(Wc, PR)
+    if kind not in ("compressor", "turbine"):
+        raise ValueError(f"{name}: kind must be 'compressor' or 'turbine', got {kind!r}")
+
+    # eta <= 0 is repaired on TURBINES ONLY, and the asymmetry is the point.
+    #
+    # On a compressor those cells all have PR < 1 -- 12 of 12 across the supplied
+    # maps -- so dividing by a negative eta cancels against a negative numerator
+    # and yields tau > 1: work going in, temperature up, pressure down. That is
+    # a stalled corner correctly modelled, it is what the loader has always done,
+    # and repairing eta there would turn it into cooling. Left exactly alone.
+    #
+    # On a turbine eta multiplies, so a non-positive eta means no work or work
+    # of the wrong sign, and 35 of 36 such cells have PR > 1 where nothing
+    # cancels. Those are padding -- 29 of 36 sit on the first or last beta row --
+    # so interpolate eta from the valid cells of the same speed line and record
+    # what was touched. Silently dividing by -0.0339 is how `MediumPqPTurbine`
+    # came to hold -153 kJ/kg against an ideal 5.2 kJ/kg (`PLAN.md` §3.38).
+    repaired: tuple[tuple[int, int], ...] = ()
+    if kind == "turbine":
+        eff = np.array(eff, dtype=float, copy=True)
+        bad = ~(eff > 0.0)
+        repaired = tuple((int(i), int(j)) for i, j in zip(*np.where(bad)))
+        for j in range(eff.shape[1]):
+            col = bad[:, j]
+            if not col.any():
+                continue
+            if col.all():
+                raise ValueError(
+                    f"{name}: speed line {speed[j]:g} has no cell with eta > 0, "
+                    f"so there is nothing to interpolate from"
+                )
+            eff[col, j] = np.interp(beta[col], beta[~col], eff[~col, j])
+
+    if kind == "compressor":
+        # Work INTO the flow: actual rise is the isentropic rise over eta.
+        corrected_work = gas.cp * T_REF * (PR**gas.gm1_over_g - 1.0) / eff
+    else:
+        # Work OUT of the flow. Two things differ and both matter: the machine
+        # expands, so the isentropic change is a DROP of cp·T_ref·(1 − PR^−k)
+        # with PR the expansion ratio, and a turbine delivers LESS than ideal,
+        # so eta multiplies rather than divides. Signed as the stagnation
+        # enthalpy change across the machine, which makes it negative and tau
+        # less than one -- a turbine cools. Applying the compressor form here
+        # gave every turbine cell a temperature RISE: +41% where a PR 3, eta
+        # 0.9 stage drops 24%.
+        corrected_work = -eff * gas.cp * T_REF * (1.0 - PR**-gas.gm1_over_g)
 
     tau = 1.0 + corrected_work / (gas.cp * T_REF)
     if np.any(tau <= 0.0):
         raise ValueError(f"{name}: non-physical temperature ratio derived from the map")
-    ecmf = Wc * np.sqrt(tau) / PR
+    # ECMF ≡ W·√T₀₂/p₀₂ = Wc·√τ · (p₀₁/p₀₂). A compressor tabulates PR = p₀₂/p₀₁
+    # so that factor is 1/PR; a turbine tabulates the expansion ratio p₀₁/p₀₂,
+    # so it is PR.
+    # Written as two expressions rather than one with a reciprocal: multiplying
+    # by 1/PR differs from dividing by PR in the last bit, and the compressor
+    # path is meant to be untouched by this change, not almost untouched.
+    if kind == "turbine":
+        ecmf = Wc * np.sqrt(tau) * PR
+    else:
+        ecmf = Wc * np.sqrt(tau) / PR
 
     return BetaMap(
         name=name,
@@ -649,4 +753,6 @@ def load_beta_map(path: str | Path, gas: PerfectGas, name: str | None = None) ->
         corrected_work=corrected_work,
         ecmf=ecmf,
         gas=gas,
+        kind=kind,
+        repaired_efficiency=repaired,
     )
