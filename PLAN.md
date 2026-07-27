@@ -1245,9 +1245,36 @@ Default is now `exit_offset` 2, with 3 equally good and 4+ excluded by §3.30.
 converged answer at one pressure ratio, because that is the quantity that
 actually differs.
 
-**Scope.** This is measured on `HighPqPCompr` and on the seeded field for four
-operating points. The full four-map sweep has not been re-run with
-`exit_offset` 2, so §3.33's 261/315 stands as the last complete figure.
+**The full re-sweep confirms it, and the table changes shape.** `HighPqPCompr`
+with `exit_offset` 2 — **56/70**, against 46/70 at offset 1 and 21/70 before
+§3.32, with refused lines 25/35 against 15/35:
+
+| Nc | f=0.0 | f=0.15 | f=0.35 | f=0.5 | f=0.65 | f=0.85 | f=1.0 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.800 | −3.2e−05 | ok | ok | ok | ok | ok | ok |
+| 0.850 | −1.1e−03 | ok | ok | ok | ok | ok | ok |
+| 0.900 | −1.2e−02 | ok | ok | ok | ok | ok | +1.2e−05 |
+| 0.925 | −3.3e−02 | ok | ok | ok | ok | ok | +1.3e−04 |
+| 0.950 | −7.5e−02 | ok | ok | ok | ok | ok | +7.6e−04 |
+| 0.975 | −1.3e−01 | ok | ok | ok | ok | ok | +2.1e−03 |
+| 1.000 | −2.0e−01 | ok | ok | ok | ok | ok | +4.1e−03 |
+| 1.025 | −2.3e−01 | ok | ok | ok | ok | ok | +5.3e−03 |
+
+**Thirteen DIED cells became zero.** Every interior cell on every speed line
+holds, to **PR 26.999**. What is left is exactly the two end columns, mirror
+signed and monotone in PR — §3.34's off-table clamp, which that section
+demonstrates is fixed by moving 1% inside the table (−7.54e−02 → +4.14e−08 on
+this map). Not a closure defect.
+
+`TwoStgRadialCompr` reproduces offset 1 row for row: its failures are clamp and
+surge only, and it has no station-limited cells — consistent, since its deaths
+were always at f = 0.15 on the surge branch rather than in the interior.
+
+**One prediction was wrong and is worth recording.** I expected the choke-end
+cells (f = 1.0) to clear, having assigned them to the station. They improve —
++2.0e−04 to +1.3e−04 at Nc 0.925, +2.1e−03 to +7.6e−04 at Nc 0.950 — but do not
+clear, because f = 1.0 *is* the choke table end and therefore the clamp. Both end
+columns are clamp-limited; the station fix only ever addressed the interior.
 
 ### 3.35 The exit station under-reads ECMF, and the error scales with PR
 
