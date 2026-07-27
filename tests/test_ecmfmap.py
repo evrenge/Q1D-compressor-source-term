@@ -223,6 +223,11 @@ class TestOffTableIsCounted:
     placed *exactly* on the end of the ECMF range gives −7.54e−02 and never
     converges; **one percent** inside, the same line holds at +4.14e−08. A step,
     not a slope — and completely invisible without a counter.
+
+    A non-zero count is not by itself a failure. Startup routinely leaves the
+    table and comes back: Nc 1.000 f = 0.15 logs 824 excursions and holds at
+    +5.6e−08. It is a *persistent* count, still rising after the flow settles,
+    that means the run is pinned against the edge of the data.
     """
 
     def test_a_lookup_inside_the_table_is_not_counted(self):

@@ -1189,6 +1189,63 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.35 The exit station under-reads ECMF, and the error scales with PR
+
+§3.34 leaves one family unexplained: the deaths on `HighPqPCompr` Nc 0.975–1.025
+at f = 0.35–0.85. They are not surge (the PR peak is at f = 0.0000 on every one
+of those lines, so all interior cells are on the stable branch), not the
+off-table clamp (they sit far from either end), and not the acoustic loop —
+`key_lag` 0.01/0.03/0.1/0.3 die at steps 1399/2432/1089/1089, delayed
+non-monotonically and never prevented. Seeding was checked and is clean: the
+seeded disk profile runs Mach 0.155 down to 0.028 with no infeasible inversion.
+
+**Watching one die settles it.** `HighPqPCompr` Nc 1.000, design ECMF 9.2191 in a
+table spanning [7.7336, 10.7046]:
+
+| step | W err | PR applied | ECMF key | max M | off-table |
+| --- | --- | --- | --- | --- | --- |
+| 100 | +3.35e−01 | 26.885 | **7.7334** | 0.878 | 100 |
+| 500 | −1.16e−01 | 21.244 | 9.4493 | 0.759 | 190 |
+| 1300 | +2.23e+00 | 19.063 | 10.4076 | **1.091** | 190 |
+| 1399 | — | — | — | — | died, cell 98 at p = −68.7 |
+
+The key pins at **7.7334 — the table minimum — from step 1**, so the disk applies
+the line's *maximum* PR, 26.885 against a design 21.846. Whether a cell survives
+is then just how far its design point sits from that maximum: f = 0.15 (design
+PR 25.129) takes a 7% over-pressure, survives, and walks back; f = 0.50 takes 23%
+and tears itself apart. That is also why the deaths spread inward *from the choke
+side* and why PR does not order them — Nc 1.000 f = 0.15 at PR 25.129 holds while
+f = 0.35 at PR 23.123 dies.
+
+**The cause is a measurement error, not dynamics.** Reading the exit station on
+the *exact seeded design field*, before a single step:
+
+| Nc | PR | ECMF design | ECMF read | ratio |
+| --- | --- | --- | --- | --- |
+| 0.700 | 3.95 | 9.2125 | 8.7881 | **0.954** |
+| 0.950 | 15.88 | 9.4545 | 7.2623 | 0.768 |
+| 0.975 | 16.59 | 10.4206 | 7.9130 | 0.759 |
+| 1.000 | 21.85 | 9.2191 | 6.3436 | 0.688 |
+| 1.000 | 25.13 | 8.1793 | 5.2836 | **0.646** |
+
+**4.6% low at PR 4, 35% low at PR 25.** The table is only ~38% wide, so beyond
+PR ~16 the very first reading falls off the bottom of it.
+
+This reframes §3.30–§3.34 rather than merely extending them. The closure has
+never read ECMF accurately; at low pressure ratio the error is small enough that
+the restoring feedback absorbs it, which is why 261/315 cells hold and why every
+converged answer is still right to 1e−07. Above PR ≈ 16 the error exceeds what
+the map can absorb and there is nothing left to correct against.
+
+**Not yet identified: why the reading is low.** Two candidates, neither
+confirmed. The station reads the face between the last forced cell and the next,
+and with `n_smear` = 7 the last forced cell holds the state after 6.5 of 7 source
+shares, so a Roe flux built from the two straddling cells need not carry the full
+post-disk jump. Against that, `exit_offset` 1, 2 and 3 give identical answers at
+PR 3.36 — if it were simply proximity to the smear, moving out should have moved
+it. Resolving this is the next step, and it is worth more than any of the
+downstream symptoms.
+
 ### 3.34 Family A was two mechanisms wearing the same clothes
 
 §3.33's sweep leaves the two β-end columns failing on both high-pressure maps,

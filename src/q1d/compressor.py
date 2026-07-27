@@ -1557,11 +1557,14 @@ class EcmfCompressor:
     def off_table(self) -> int:
         """Steps whose demanded ECMF fell outside the tabulated speed line.
 
-        **A converged run with a non-zero count has converged to the edge of the
-        data, not to an answer.** The map holds no information beyond its own
-        ends, so the lookup clamps — which is the right thing to do, since §3.8
-        measures extrapolation as the worst error source on these maps, but it
-        leaves the operating point pinned with no restoring force outward.
+        **A non-zero count is not by itself a failure — a persistent one is.**
+        Startup routinely goes off-table and recovers: ``HighPqPCompr`` Nc 1.000
+        f = 0.15 logs 824 excursions and still holds at +5.6e−08. What matters is
+        whether the count is still rising once the flow has settled, because the
+        map holds no information beyond its ends and the lookup clamps there —
+        the right thing to do, since §3.8 measures extrapolation as the worst
+        error source on these maps, but it leaves the operating point pinned with
+        no restoring force outward.
 
         Measured on ``HighPqPCompr`` Nc 0.950 (``PLAN.md`` §3.34): a design point
         placed *exactly* on the end of the ECMF range gives −7.54e−02 and never
