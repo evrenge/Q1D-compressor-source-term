@@ -1189,6 +1189,48 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.27 The full-map sweep, and surge as a correct failure
+
+225 operating points: four maps, every tabulated speed line, positions 0.15 to
+0.85 along each line, plus the **β = 0 and β = 1 ends** — surge and choke — which
+an earlier grid had avoided and which are the points worth having a map for.
+
+**The extremes are not a problem.** `SubsonicCompressor` holds **24/24** at
+β = 0 and β = 1, every speed line, up to PR 3.082 at surge and 2.133 at choke.
+`TranssonicCompressor` holds **8/8** on its four invertible lines. Wherever the
+closure can be evaluated at all, the tabulated ends behave like the interior.
+
+**Pressure ratios far beyond anything earlier.** `HighPqPCompr` holds **PR
+14.972** at Nc 0.925, and `TwoStgRadialCompr` holds **PR 11.254** at Nc 0.900 —
+single disk, `n_smear` = 7.
+
+**Most surge-side failures are the model being right.** On
+`TwoStgRadialCompr` the failures cluster at the surge end (f = 0.15) while
+f ≥ 0.35 holds. Taking the static-stability slope there:
+
+| Nc | f | PR | normalised `dp_exit/dW` | sweep |
+| --- | --- | --- | --- | --- |
+| 0.85 | 0.15 | 9.308 | **+0.0564** rising | died |
+| 0.90 | 0.15 | 11.254 | **+0.0895** rising | died |
+| 0.90 | 0.35 | 10.830 | −1.2647 falling | held |
+| 0.90 | 0.65 | 9.350 | −6.1753 falling | held |
+
+A rising branch is statically unstable — that is what surge *is*, and a real
+machine cannot sit there either. **Diverging is the correct answer**, and it is
+reassuring that the model finds it in the right place rather than everywhere or
+nowhere.
+
+Two surge-side failures are *not* explained this way: Nc 0.65 and 0.80 at
+f = 0.15 have falling slopes and should hold. But those slopes are **−0.014 and
+−0.0062**, two orders of magnitude flatter than the −1.26 and −6.18 of the
+healthy points — marginal ground where the restoring force has nearly vanished.
+Whether the model or the margin is at fault there is not yet established.
+
+**A surge-line test is now possible and should exist.** The map's own
+`dp_exit/dW = 0` contour is a predicted surge line; the solver's divergence
+boundary is a measured one. Comparing them is a physics validation the project
+has never had, and it is nearly free given both pieces exist.
+
 ### 3.26 Inlet-Wc keying is not ill-conditioned near choke, it is rank-deficient
 
 The full-map sweep answers a question that had been carried on assertion. Keying
