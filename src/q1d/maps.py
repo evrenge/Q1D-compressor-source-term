@@ -535,11 +535,21 @@ class ECMFMap:
             answer lives; the extrapolated values are transient, not the answer.
             """
             x, y = self.ecmf[:, col], a[:, col]
-            if extrapolate and ecmf < x[0]:
-                return float(y[0] + (ecmf - x[0]) * (y[1] - y[0]) / (x[1] - x[0]))
-            if extrapolate and ecmf > x[-1]:
-                return float(y[-1] + (ecmf - x[-1]) * (y[-1] - y[-2]) / (x[-1] - x[-2]))
-            return float(np.interp(ecmf, x, y))
+            if not extrapolate:
+                return float(np.interp(ecmf, x, y))
+            # Bounded: the slope is held for one speed-line width past each end
+            # and the value is frozen beyond that. The restoring force is what
+            # the near field is for, and one width is far more than any
+            # converging transient uses; past that the linear model means
+            # nothing and an unbounded ray would just be a different way to
+            # return a wrong number confidently.
+            span = float(x[-1] - x[0])
+            e = min(max(ecmf, float(x[0]) - span), float(x[-1]) + span)
+            if e < x[0]:
+                return float(y[0] + (e - x[0]) * (y[1] - y[0]) / (x[1] - x[0]))
+            if e > x[-1]:
+                return float(y[-1] + (e - x[-1]) * (y[-1] - y[-2]) / (x[-1] - x[-2]))
+            return float(np.interp(e, x, y))
 
         # Record that the demand left the table. Clamping is the right thing to
         # DO -- the map has no information out there and extrapolating it is

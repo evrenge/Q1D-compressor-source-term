@@ -165,19 +165,44 @@ def test_between_speed_lines_it_differs_by_the_crossing_scheme(path):
 
 
 @pytest.mark.parametrize("path", MAPS)
-def test_it_clamps_rather_than_extrapolates(path):
-    """§3.8 measured extrapolation as the worst error source on these maps."""
+def test_it_holds_the_end_slope_for_one_width_then_stops(path):
+    """The gradient continues past each end; the value stops. §3.36.
+
+    §3.8 measured extrapolation as the worst error source on these maps, and
+    that stays true of the *value* — which is why this is bounded, and why the
+    previous version of this test asserted a flat clamp. What that missed is
+    the *gradient*. A flat characteristic has no restoring force, and no
+    restoring force is precisely the surge condition (§3.34), so clamping
+    manufactured an artificial surge at every table end: a point that wandered
+    out was pinned there, and the run converged to the edge of the data rather
+    than to an answer. `HighPqPCompr` went 56/70 to 70/70 on this one change.
+
+    So: linear on the terminal slope for one speed-line width past each end,
+    frozen beyond that. One width is far more than a converging transient
+    uses, and past it the linear model means nothing — an unbounded ray would
+    only be a different way to return a wrong number confidently.
+    """
     b = beta_map(path)
     e = ECMFMap.from_beta_map(b)
     nc = sample_speeds(b)[len(sample_speeds(b)) // 2]
     line = b._speed_line(nc)[0]
     lo, hi = float(line.min()), float(line.max())
-    assert e.evaluate(lo - 10.0 * (hi - lo), nc).PR == pytest.approx(
-        e.evaluate(lo, nc).PR, rel=1e-9
-    )
-    assert e.evaluate(hi + 10.0 * (hi - lo), nc).PR == pytest.approx(
-        e.evaluate(hi, nc).PR, rel=1e-9
-    )
+    span = hi - lo
+
+    def pr(x):
+        return e.evaluate(x, nc).PR
+
+    # Linear just outside: equal steps in ECMF give equal steps in PR. Stated
+    # this way rather than as "not flat" because it holds whatever the slope
+    # is, including a map whose last interval happens to be flat.
+    for a, b_, c in ((lo, lo - 0.1 * span, lo - 0.2 * span),
+                     (hi, hi + 0.1 * span, hi + 0.2 * span)):
+        assert pr(c) - pr(b_) == pytest.approx(pr(b_) - pr(a), rel=1e-6, abs=1e-12)
+
+    # Bounded past one width: this is what §3.8 is owed.
+    for k in (1.0, 10.0, 1000.0):
+        assert pr(lo - k * span) == pytest.approx(pr(lo - span), rel=1e-9)
+        assert pr(hi + k * span) == pytest.approx(pr(hi + span), rel=1e-9)
 
 
 def test_a_turbine_is_refused_with_a_useful_message():
@@ -215,19 +240,22 @@ class TestOffTableIsCounted:
 
     The map holds no information beyond its own ends, and §3.8 measures
     extrapolation as the worst error source on these maps — so clamping is the
-    correct action. But a clamped lookup leaves the operating point pinned with
-    no restoring force outward, and the run then converges to the edge of the
-    data rather than to an answer.
+    correct action for the *value*, and it is still what happens more than one
+    speed-line width out.
 
     Measured on ``HighPqPCompr`` Nc 0.950 (``PLAN.md`` §3.34): a design point
     placed *exactly* on the end of the ECMF range gives −7.54e−02 and never
     converges; **one percent** inside, the same line holds at +4.14e−08. A step,
     not a slope — and completely invisible without a counter.
 
-    A non-zero count is not by itself a failure. Startup routinely leaves the
-    table and comes back: Nc 1.000 f = 0.15 logs 824 excursions and holds at
-    +5.6e−08. It is a *persistent* count, still rising after the flow settles,
-    that means the run is pinned against the edge of the data.
+    **What the count means changed in §3.36.** Under the flat clamp a
+    persistent count meant the run was pinned against the edge of the data with
+    no restoring force, so a converged run with a non-zero count was not to be
+    trusted. Holding the terminal slope removes the pinning, and the same four
+    cells now converge at 1e−10 to 1e−11 while logging 1281 to 12442 excursions
+    apiece. So the count no longer diagnoses anything on its own — it says the
+    transient used the outside, which is now allowed and expected. It remains
+    worth having as the only way to see that it happened at all.
     """
 
     def test_a_lookup_inside_the_table_is_not_counted(self):
@@ -246,12 +274,20 @@ class TestOffTableIsCounted:
         e.evaluate(lo - 0.05 * (hi - lo) if side == "below" else hi + 0.05 * (hi - lo), nc)
         assert int(e.off_table[0]) == 1
 
-    def test_the_clamped_value_is_still_the_end_value(self):
-        """Counting must not change what the lookup returns."""
+    def test_counting_does_not_change_what_the_lookup_returns(self):
+        """The counter is a side effect, not a modifier.
+
+        Asserted as idempotence rather than against a fixed expected value:
+        the previous version pinned this to the clamped end value, which made
+        it a second copy of the clamping test and meant §3.36's change to the
+        end behaviour broke it here too, for no reason of its own.
+        """
         e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
         col = len(e.corrected_speed) // 2
         lo, hi = float(e.ecmf[0, col]), float(e.ecmf[-1, col])
         nc = float(e.corrected_speed[col])
-        assert e.evaluate(lo - 10.0 * (hi - lo), nc).PR == pytest.approx(
-            e.evaluate(lo, nc).PR, rel=1e-9
-        )
+        x = lo - 10.0 * (hi - lo)
+        first = e.evaluate(x, nc).PR
+        for _ in range(4):
+            assert e.evaluate(x, nc).PR == pytest.approx(first, rel=1e-12)
+        assert int(e.off_table[0]) == 5
