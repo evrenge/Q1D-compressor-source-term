@@ -1189,35 +1189,43 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
-### 3.29 What is left clusters toward choke, and it is β with nothing to grip
+### 3.29 What is left is the flat speed lines — the same rank deficiency, weakened
 
 The full-map sweep with §3.28's closure runs every tabulated speed line of all
 four maps — including the 13 the inverse refuses — at seven positions each,
 β = 0 and β = 1 among them. The failures that remain are not scattered. They sit
 in one place, and the place identifies the mechanism.
 
-**Failures concentrate toward choke — as a rate, not as a threshold.** Over 175
-swept cells, 158 hold and 17 do not. Binning by position along the `Wc` range:
+**What predicts failure is how flat the speed line is, not where you sit on it.**
+Binning the interior cells by the line's own `Wc` span:
 
-| position in `Wc` | cells | failures | rate |
+| line's `Wc` span | interior cells | failures | rate |
 | --- | --- | --- | --- |
-| above 0.95 | 51 | 14 | **27%** |
-| below 0.95 | 124 | 3 | **2.4%** |
+| **< 25%** | 45 | 18 | **40%** |
+| ≥ 25% | 90 | 3 | **3.3%** |
 
-An eleven-fold concentration, and that is all it is. **There is no threshold.**
-An earlier draft of this section claimed "every failure is in the last 3% of the
-`Wc` range", generalised from the nine cells available at the time. The completed
-sweep refutes it twice over: 37 cells above position 0.95 *hold*, and three
-failures sit nowhere near choke —
+and the ordering is close to monotone in the span: the four tightest lines
+(`TranssonicCompressor` Nc 1.000 at 4.5%, Nc 0.952 at 7.5%, `SubsonicCompressor`
+Nc 1.200 at 8.0%, `HighPqPCompr` Nc 0.750 at 10.0%) carry 12 of the 21 interior
+failures between them, while every line above 25% span is clean except three.
+Two of those three are the `TwoStgRadialCompr` f = 0.15 cells §3.27 already
+attributes to genuine surge.
 
-| off-pattern failure | position | note |
-| --- | --- | --- |
-| `HighPqPCompr` Nc 0.800 f = 0.00 | **0.000** | the *surge* end |
-| `TwoStgRadialCompr` Nc 0.650 f = 0.15 | 0.423 | the one DIED; surge, cf. §3.27 |
-| `SubsonicCompressor` Nc 1.200 f = 0.50 | 0.937 | below the claimed bracket |
+**This is §3.26's rank deficiency, weakened but not gone.** The residual's grip
+on β is `∂Wc_map/∂β`, and the span is exactly that quantity integrated along the
+line. So the thing that stops the *inverse* existing is the same thing that stops
+the *relaxation* converging — the closure was never going to escape it entirely,
+only soften it. What §3.28 buys is that a flat line can now be **run** at all,
+and that its endpoints hold; what it does not buy is the interior of the very
+flattest lines.
 
-The boundary also moves with speed rather than sitting at a fixed position:
-`SubsonicCompressor` holds to 0.961 at Nc 1.0 but fails from 0.937 at Nc 1.2.
+*Corrected from an earlier draft.* This section first claimed "every failure is
+in the last 3% of the `Wc` range", generalised from the nine cells then
+available. With 175 cells swept that is wrong in both directions: 37 cells above
+position 0.95 hold, and three failures sit nowhere near choke — including
+`HighPqPCompr` Nc 0.800 at position **0.000**, which is the surge end. Position
+along the line gives an elevenfold concentration (27% above 0.95 against 2.4%
+below) but no threshold; the span does better and has a mechanism behind it.
 
 **Where both closures fail, the inverse misses by less.** On
 `SubsonicCompressor` Nc 1.200, the inverse's near-choke failures are 9.3e−04 and
