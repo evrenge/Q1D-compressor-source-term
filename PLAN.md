@@ -1560,6 +1560,46 @@ one thing moves, and the cheapest check is to write down what else changed when
 the swept parameter did. **Flat width remains untested**; the two attempts at it
 both varied the taper gradient as well.
 
+### 3.24 Engine-scale pressure ratio on a real map
+
+Every staged result before this used `ConstantCompressorMap` — fixed `PR`, fixed
+`η`, no dependence on `Wc`. Deliberate, since it isolates the scheme, but it
+means the map's restoring slope, the load-bearing physics of §3.16, was absent
+from all of it, and a constant-PR stage can neither surge nor choke.
+
+**Why each stage needs its own scaled map.** With one map and a fixed `W`, stage
+`k` sees `Wc = W√θ_k/δ_k`. Across a stage of PR ≈ 2, `δ` doubles while `√θ` rises
+about 12%, so `Wc` roughly **halves every stage** and leaves the tabulated range
+after two. That is not an artefact — it is why a real multistage compressor's
+stages are different machines, each sized to its own inlet corrected flow. The
+standard device is stage stacking: the same map shape scaled per stage, which
+also puts every stage at the same relative point, i.e. a repeating-stage machine.
+
+`SubsonicCompressor`, Nc 1.0, 35% along the speed line, `n_smear` = 1,
+`sample_offset` = 2, 601 cells, converged on `residual_norm` < 1e−11:
+
+| stages | stage PR | OPR | exit `T₀` | mass-flow error |
+| --- | --- | --- | --- | --- |
+| 1 | 2.2177 | 2.218 | 368.7 K | −1.648e−06 |
+| 2 | 2.2177 | 4.918 | 471.9 K | −2.454e−06 |
+| 4 | 2.2177 | 24.188 | 772.7 K | −1.697e−06 |
+| 6 | 2.2177 | **118.959** | 1265.3 K | **+4.415e−07** held |
+
+Mass flux uniform to ~4e−09 throughout, zero reverse-flow events, and — the part
+that matters — **the error does not grow with stage count**. Six stages are no
+worse than one, so the per-stage errors are not accumulating.
+
+That is past the OPR ≈ 80 that motivated the whole exercise, with real maps and
+every stage finding its own operating point.
+
+**What this is not.** Perfect gas, γ = 1.4 and constant `cp`, with an exit at
+1265 K where real-gas effects are large — Phase 4 will move these numbers and
+they should not be quoted as physical until it does. One speed line. Stage
+stacking puts every stage at the same relative map point, where a real machine
+has stage-to-stage variation. And it is a design-point result: the off-design
+matching, where the stages have to slide along their maps to find each other, is
+the next test and the one the real slope actually gets exercised by.
+
 ### 3.23 The upstream "boundary layer" was the probe, and it cost 10 cells a row
 
 Phase 3 measured the disk perturbing the field *upstream* of itself, decaying
