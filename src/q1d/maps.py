@@ -480,11 +480,19 @@ class ECMFMap:
                 f"Turbines are the usual case — key those on PR instead"
             )
 
+        # Column-major, because every lookup slices a *column*: `evaluate` reads
+        # `a[:, col]` six times per call, and on a C-ordered array that slice is
+        # strided, so numpy materialises a copy of the whole speed line before
+        # it can interpolate — making the lookup O(n_key) in a memcpy rather
+        # than O(log n_key) in a search. Fortran order makes the same slice a
+        # contiguous view: 7.42 µs to 1.69 µs at 1009×649, and the cost stops
+        # growing with densification, which is what made `densify` 72 look
+        # unaffordable when it is not.
         rows = n_key or m.ecmf.shape[0]
-        key = np.empty((rows, n_speed))
-        pr = np.empty((rows, n_speed))
-        cw = np.empty((rows, n_speed))
-        eff = np.empty((rows, n_speed))
+        key = np.empty((rows, n_speed), order="F")
+        pr = np.empty((rows, n_speed), order="F")
+        cw = np.empty((rows, n_speed), order="F")
+        eff = np.empty((rows, n_speed), order="F")
         for j in range(n_speed):
             e = m.ecmf[:, j]
             order = np.argsort(e)
