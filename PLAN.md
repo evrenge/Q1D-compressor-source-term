@@ -1419,6 +1419,12 @@ the clamp across two rows and filing the −7.2e−01 surge cell under the clamp
 split above is the measured one. **Of the 43, only the 32 are outstanding work** —
 and a single clamp fix would take the library to roughly 304/315.
 
+*That estimate was wrong, and §3.37 says how.* The 32 were not one group: 14 were
+a clamp artefact and cleared, while the rest are `TwoStgRadialCompr` sitting past
+its own PR peak, where failing is correct. The fix landed 292/315, not 304 — and
+the shortfall is not missing work but cells that should never have been counted
+as recoverable.
+
 **One prediction was wrong and is worth recording.** I expected the choke-end
 cells (f = 1.0) to clear, having assigned them to the station. They improve —
 +2.0e−04 to +1.3e−04 at Nc 0.925, +2.1e−03 to +7.6e−04 at Nc 0.950 — but do not
