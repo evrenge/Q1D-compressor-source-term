@@ -1167,6 +1167,7 @@ class FlowMatchedCompressor:
     beta0: float | None = None  # None -> start at mid-line
     secant: bool = False  # default flips once the sweep justifies it
     exit_offset: int | None = None  # not None -> key on measured exit ECMF
+    direct: bool = False  # with exit_offset: plain lookup, no relaxation at all
     last: MappedDiskState = field(default_factory=MappedDiskState)
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
@@ -1192,6 +1193,8 @@ class FlowMatchedCompressor:
             raise ValueError(f"gain must be positive, got {self.gain!r}")
         if self.exit_offset is not None and self.exit_offset < 1:
             raise ValueError("exit_offset must be >= 1 so the station is clear of the disk")
+        if self.direct and self.exit_offset is None:
+            raise ValueError("direct lookup needs exit_offset -- there is nothing to look up on")
         self._filter = InletFilter(self.inlet_lag)
         self._levels = LocalLevelFilter(self.inlet_lag)
         self._weights = np.full(self.n_smear, 1.0 / self.n_smear)
@@ -1333,6 +1336,16 @@ class FlowMatchedCompressor:
                 e_meas = self._measure_exit_ecmf(solver, gas, T01, p01, theta, delta)
                 if math.isnan(e_meas):
                     residual = 0.0
+                elif self.direct:
+                    # No relaxation and no Newton step: read the map at the
+                    # measured ECMF and take that as β. The relaxation existed to
+                    # tame an algebraic loop, and reading the field at the START
+                    # of the step already removes it — §3.9's loop-gain objection
+                    # applies within a step, not across one.
+                    self._beta = self.beta_map.evaluate_at_ecmf(
+                        e_meas, self.corrected_speed
+                    ).beta
+                    residual = math.nan
                 else:
                     e_b = float(np.interp(self._beta, self._beta_grid, self._ecmf_line))
                     residual = e_meas / e_b - 1.0
@@ -1348,11 +1361,14 @@ class FlowMatchedCompressor:
                     if lo <= measured <= hi:
                         deriv = measured
                         self._secant_uses += 1
-            self._r_prev, self._b_prev = residual, self._beta
-            nb = self._beta - (1.0 - math.exp(-dt / self._tau)) * self.gain * residual / deriv
-            if nb < 0.0 or nb > 1.0:
-                self._clamps += 1
-            self._beta = min(1.0, max(0.0, nb))
+            if not math.isnan(residual):
+                self._r_prev, self._b_prev = residual, self._beta
+                nb = self._beta - (
+                    1.0 - math.exp(-dt / self._tau)
+                ) * self.gain * residual / deriv
+                if nb < 0.0 or nb > 1.0:
+                    self._clamps += 1
+                self._beta = min(1.0, max(0.0, nb))
 
         point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
         dh0 = point.corrected_work * theta
