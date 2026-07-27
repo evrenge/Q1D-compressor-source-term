@@ -1122,11 +1122,14 @@ class FlowMatchedCompressor:
     injects, so ``PR_meas ≡ PR(β)`` to within the scheme's dissipation and the
     residual carries no information about β at all.
 
-    **The sign is restoring.** ``Wc_meas > Wc_map(β)`` means the duct is passing
-    more than the map allows at this position, so β must move toward choke, which
-    lowers ``PR``, which raises the inlet static pressure against a fixed inlet
-    total, which lowers ``W``. ``∂lnPR/∂β`` carries the sign of the map's
-    orientation, so the leading minus is correct for either β convention.
+    **The sign is restoring, and both halves of it point the same way.**
+    ``Wc_meas > Wc_map(β)`` means the duct is passing more than the map allows at
+    this position, and the step moves β toward choke. That closes the gap twice
+    over: ``Wc_map`` rises to meet the measurement, *and* ``PR`` falls, which
+    raises the inlet static pressure against a fixed inlet total and brings the
+    actual flow down. ``∂lnECMF/∂β`` carries the sign of the map's orientation,
+    so no explicit sign convention for β is baked in — a map tabulated the other
+    way round works unchanged.
 
     **The fixed point is the map, exactly.** At steady state ``dβ/dt = 0`` forces
     ``Wc_meas = Wc_map(β)``, which is the same equation :class:`InletFlowCompressor`
