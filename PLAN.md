@@ -1452,10 +1452,120 @@ Consequences, in order of importance:
   and `Δh₀` do not depend on `Wc`. With a real map it would bite, and that is the
   first thing to fix before staging a mapped machine.
 
+**The fix, and it is forward-compatible.** `Solver.mass_flux_at(cell)` returns
+the conserved mass flow from the numerical face fluxes, averaged over the cell's
+two bounding faces, and every disk now samples that instead of forming
+`ρ·u·a_cell`. It is free: `residual` computes the fluxes *before* calling the
+source, so they are cached and waiting.
+
+`Solver.face_fluxes` already existed and its docstring already warned that
+cell-centred `ρuA` "is only uniform to `O(dx²)` wherever the area has curvature".
+The right probe was there, documented, and the closure used the wrong one anyway
+— which is how two rounds got spent arguing with a plateau.
+
+**This must not be justified by "the mass equation has no source".** That is true
+today and will stop being true: interstage bleed and turbine cooling air both
+remove mass, and then the flux legitimately *steps* along the duct. The property
+actually relied on is narrower and survives: the face flux is the conserved
+quantity, so it stays the right measure of what passes a station whatever sits
+upstream. Two consequences to bank before bleed lands:
+
+* the two-face average is the flow *through* the cell — with a mass source in
+  that cell it is the mid-cell value, which is what a station wants;
+* the **spread of mass flux along the duct stops being a convergence measure**
+  once bleed exists, since it is then legitimately non-zero. `residual_norm` is
+  the source-agnostic measure and should take over that job.
+
+#### What the mesh is actually spent on
+
+Worth stating plainly, because the ratio is not what one would guess. The
+twelve-stage rig, 1 m duct, 601 cells, `dx` = 1.664 mm:
+
+| region | cells |
+| --- | --- |
+| inlet duct before stage 1 | 27 |
+| **compressor** (`n_smear` = 1 × 12 stages) | **12** |
+| duct between and around stages | 484 |
+| exit duct after stage 12 | 78 |
+
+**12 cells of compressor against 589 of duct — 2% versus 98%.** Each disk also
+sits on a 7-cell constant-area flat (`2·pad + n_smear`) with 44 cells of gap
+between stages. The single-disk cases are `ncell` = 201 with the disk at cell 90:
+21 cells of compressor at `n_smear` = 21, and **one** in the PR 5.040 case.
+
+For an engine with many components that ratio should invert, and the resolution
+should follow the gradients rather than the component count.
+
 **Status.** Staged OPR 30, twelve stages, tapered annulus: converged, stable,
-**+9.0e−05**. Not held to the gate. The next move is not more marching — it is to
-put every sampling station inside its own constant-area flat and remeasure, since
-that is a known bias of the right order sitting directly in the closure's input.
+**+9.0e−05** as measured by the old cell-centred probe. With `mass_flux_at`, the
+6-stage case measures the mass flux as **uniform to ~1e−12 across every face** —
+so the solver conserves mass exactly and these are genuine steady states — while
+sitting ~1e−4 from the *analytic design chain*. That is a truncation question,
+not a conservation one, and the mesh sweep is what answers it.
+
+**Three confounded experiments in a row, and what they have in common.** Worth
+recording as a methodological note, because the same mistake wore three
+different costumes:
+
+1. *pad = 3/10/25 at fixed gap.* Widening the flat also shortens the taper, so
+   the area gradient steepens. Read as "flat width does not matter".
+2. *pad = 3/14/20 at gap 60.* Same coupling, sharper: pad 20 leaves 19 cells of
+   taper instead of 57, roughly tripling `dA/dx`. Read as "putting the station
+   in the flat makes it worse" (+6.77e−05, −7.89e−05, −3.07e−04).
+3. *ncell = 401/601/901 at fixed step count.* A fixed number of steps is not a
+   fixed physical time — the finest mesh got two-thirds the physical time of the
+   middle one and was the least converged, which its peak-to-peak showed
+   plainly. Read as "the error does not fall with refinement".
+
+In each case two things varied and one was reported. The fix for the first two
+is to hold the taper length fixed and move only the station; for the third, to
+converge on `residual_norm` rather than on a step count — which is also the
+measure that survives bleed (§3.22), so it is the right instrument twice over.
+
+None of the three refutes what it appeared to refute. **Flat width and mesh
+refinement are both still untested** on the staged train.
+
+### 3.22 Designing for bleed and cooling flows, before they arrive
+
+Interstage bleed and turbine cooling air are planned, and they make ``q[0] ≠ 0``.
+Several things written down elsewhere in this document quietly assume otherwise,
+so the assumptions are collected here while they are cheap to fix.
+
+**What breaks.** Any diagnostic phrased as "the mass flux should be uniform".
+With bleed it steps by exactly the mass removed, which is correct behaviour, so
+uniformity stops being a convergence measure. `residual_norm` is the
+source-agnostic replacement and is already available.
+
+**What survives.** `mass_flux_at` — the face flux is the conserved quantity
+regardless of what sources exist, so it remains the right reading of what passes
+a station. The justification must be stated that way and not as "the mass
+equation has no source", which is the narrower claim that happens to be true
+today.
+
+**What has to be built.** A bleed port removes mass at the local stagnation
+state, so it is a source in **all three** equations at once,
+
+```
+q_bleed = −ṁ_b · [1, u, h₀] / L_port
+```
+
+and not merely a mass sink. Removing mass without the matching momentum and
+energy would inject spurious momentum and heat — a mistake that would look like
+a compressor efficiency error and be hunted for in the wrong place.
+
+**What the similarity rule becomes.** §3.18's rule is "lag the dimensionless
+operating point, never the dimensional scale factors". For a compressor the
+dimensionless quantities are `PR` and `Δh₀/θ`. For a bleed port the analogous
+invariant is a **flow coefficient** — the fraction of passing mass extracted, or
+a discharge coefficient against the port pressure ratio — not a mass flow in
+kg/s. Tabulating `ṁ_b` in kg/s would reproduce exactly the fixed-rate error that
+§3.16 traced through six weeks of symptoms.
+
+**What the reference chain must carry.** The analytic station chain used to size
+these rigs assumes `W` is the same at every station. With bleed it must track
+`W_{k+1} = W_k − ṁ_{b,k}`, and the annulus areas, back pressure and seeded
+profile all follow from that. A rig that forgets it will show a mass-flow error
+of exactly the bleed fraction and invite a search for a numerical cause.
 
 ### 3.4 Measured cost of the alternatives
 

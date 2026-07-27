@@ -892,3 +892,78 @@ def test_entropy_fix_is_inactive_where_there_is_no_sonic_point():
 
     spread = (max(errors) - min(errors)) / min(errors)
     assert spread < 0.05, f"entropy_fix should barely matter on Sod, spread {spread:.3f}"
+
+
+# -- conserved mass flow ----------------------------------------------------
+
+
+def _converged_duct(area, n=201, mach=0.45, steps=8000):
+    """A duct converged from its own exact profile, for probing mass flow."""
+    from q1d.analytic import flow_function, static_from_stagnation
+
+    p0, t0 = 101325.0, 288.15
+    grid = Grid.uniform(0.0, 1.0, n, area)
+    a0 = float(grid.a_cell[1])          # a_cell carries ghosts; [0] is one
+    w = flow_function(mach, GAS) * a0 * p0 / math.sqrt(GAS.R * t0)
+    st_out = static_from_stagnation(t0, p0, w, float(grid.a_cell[-2]), GAS)
+    st_in = static_from_stagnation(t0, p0, w, a0, GAS)
+    bc = StagnationInletStaticOutlet(p0_in=p0, T0_in=t0, p_back=st_out.p)
+    s = Solver(grid, GAS, bc, ReferenceState(rho=st_in.rho, u=st_in.u, p=p0))
+    rho = np.empty(n)
+    u = np.empty(n)
+    p = np.empty(n)
+    for i in range(n):
+        st = static_from_stagnation(t0, p0, w, float(grid.a_cell[i + 1]), GAS)
+        rho[i], u[i], p[i] = st.rho, st.u, st.p
+    s.set_state(rho, u, p)
+    for _ in range(steps):
+        s.advance(s.timestep())
+    return s, w
+
+
+def test_mass_flux_is_uniform_along_a_contracting_duct():
+    """The face flux is what the scheme conserves, so it must not vary.
+
+    Contracting duct, no source: the mass flow through every face has to be the
+    same number. This is the property that makes ``mass_flux_at`` the right
+    thing for a compressor closure to key on.
+    """
+    s, w = _converged_duct(lambda x: 0.1 - 0.02 * np.clip((np.asarray(x) - 0.2) / 0.6, 0, 1))
+    mf = s.face_fluxes()[0]
+    assert (mf.max() - mf.min()) / w < 1e-9, f"mass flux varies by {(mf.max() - mf.min()) / w:.2e}"
+    assert abs(float(mf.mean()) / w - 1.0) < 1e-5
+
+
+def test_cell_centred_mass_flow_is_only_second_order_where_the_area_curves():
+    """Why ``mass_flux_at`` exists at all, stated as a test.
+
+    In constant area the two agree to round-off. Give the wall a slope and
+    ``rho*u*A(x_centre)`` starts to disagree with the conserved flux, which is
+    what silently biased a twelve-stage machine by 6e-05 (``PLAN.md`` §3.21).
+    """
+    flat, w = _converged_duct(0.1)
+    rho, u, _, _ = flat.primitives()
+    centred = rho[1:-1] * u[1:-1] * flat.grid.a_cell[1:-1]
+    assert np.ptp(centred) / w < 1e-12, "constant area should be exact"
+
+    taper, w2 = _converged_duct(
+        lambda x: 0.1 - 0.02 * np.clip((np.asarray(x) - 0.2) / 0.6, 0, 1)
+    )
+    rho, u, _, _ = taper.primitives()
+    centred = rho[1:-1] * u[1:-1] * taper.grid.a_cell[1:-1]
+    faces = taper.face_fluxes()[0]
+    assert np.ptp(centred) / w2 > 10.0 * np.ptp(faces) / w2, (
+        "the cell-centred product should be the noisier of the two in a taper"
+    )
+
+
+def test_mass_flux_at_matches_the_conserved_flux_and_is_cached():
+    s, w = _converged_duct(0.1)
+    mid = s.grid.n_interior // 2
+    faces = s.face_fluxes()[0]
+    assert s.mass_flux_at(mid) == pytest.approx(faces[mid], rel=1e-12)
+    # `residual` caches the fluxes before calling a source, so a source term
+    # asking for the mass flow pays nothing for it
+    s._face_flux = None
+    s.residual()
+    assert s._face_flux is not None

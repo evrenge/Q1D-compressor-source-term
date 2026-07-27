@@ -184,6 +184,8 @@ class Solver:
                     f"{(grid.n_interior + 1,)} -- one entry per face"
                 )
             self.low_order_faces = mask
+        #: Face fluxes from the last `residual` call, for `mass_flux_at`.
+        self._face_flux: np.ndarray | None = None
 
         n = grid.n_interior
         self.cv = np.zeros((3, n + 2))
@@ -345,6 +347,51 @@ class Solver:
         rho, u, _, _ = self.primitives()
         return self._roe_flux(*self._reconstruct(rho, u))
 
+    def mass_flux_at(self, cell: int) -> float:
+        """Mass flow through an interior cell, from the conserved numerical flux.
+
+        The face flux is what the scheme conserves. Forming
+        ``rho * u * A(x_centre)`` instead is uniform only to ``O(dx^2)`` where
+        the area has curvature (see :meth:`face_fluxes`), and that biases anything
+        keyed on it: on a twelve-stage tapered machine two stations disagreed by
+        6e−05 with no physical error present at all (``PLAN.md`` §3.21). Since a
+        compressor closure keys its *map lookup* on the sampled mass flow, such a
+        bias moves the operating point, not merely a diagnostic.
+
+        **This does not assume the mass flux is uniform.** A source that adds or
+        removes mass — interstage bleed, turbine cooling air — makes the flux
+        step by exactly what it takes out, and that is correct behaviour rather
+        than an error. What survives is the property actually being used: the
+        face flux is the conserved quantity, so it remains the right measure of
+        what passes a station whatever sources exist upstream of it. Two
+        consequences worth stating before bleed arrives:
+
+        * **The cell's upstream face is used, not an average of its two faces.**
+          At steady state with no mass source in the cell the two are equal, so
+          this matters only to transients and to how close a station may sit to a
+          disk — and there it matters a lot. Averaging reaches half a cell
+          *towards* the disk and picks up its perturbation: with the average, a
+          station one cell upstream of a disk read a flow function 0.03% over the
+          sonic maximum during startup and raised. The upstream face is half a
+          cell further away than even the cell centre, so it is the safest of the
+          three readings. With a mass source *inside* the sampling cell it reads
+          the flow arriving at that cell, which is the well-defined thing for a
+          station placed there.
+        * The *spread* of mass flux along the duct stops being a convergence
+          measure once bleed exists, because it is then legitimately non-zero.
+          :meth:`residual_norm` is the source-agnostic measure and should be
+          preferred for that job.
+
+        Uses the fluxes cached by the last :meth:`residual` call when there is
+        one — which there is whenever a source term asks, since ``residual``
+        computes them before invoking the source — and recomputes otherwise, so
+        calling this from outside the solve is correct but not free.
+        """
+        f = self._face_flux
+        if f is None:
+            f = self.face_fluxes()
+        return float(f[0, cell])
+
     def residual(self) -> np.ndarray:
         """``d(flux)/dx - sources`` over the interior cells, shape ``(3, n)``.
 
@@ -352,6 +399,10 @@ class Solver:
         """
         rho, u, _, _ = self.primitives()
         f = self._roe_flux(*self._reconstruct(rho, u))
+        # Cached before the source is called, so a source term can read the
+        # conserved mass flux for free instead of forming rho*u*A itself. See
+        # `mass_flux_at`.
+        self._face_flux = f
         rhs = f[:, 1:] - f[:, :-1]
 
         # Geometric source p*dA, written as the *difference of the same two

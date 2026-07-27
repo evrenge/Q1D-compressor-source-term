@@ -21,6 +21,7 @@ Two properties have to hold together, and they are what this file pins:
 """
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -33,8 +34,6 @@ from q1d.gas import PerfectGas
 from q1d.grid import Grid
 from q1d.maps import load_beta_map
 from q1d.solver import NonPhysicalState, ReferenceState, Solver, SolverConfig
-
-from pathlib import Path
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 

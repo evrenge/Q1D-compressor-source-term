@@ -303,7 +303,18 @@ class ActuatorDisk:
 
     _weights: np.ndarray = field(init=False, repr=False, default=None)
     _filter: InletFilter = field(init=False, repr=False, default=None)
-    _levels: "LocalLevelFilter" = field(init=False, repr=False, default=None)
+    _levels: LocalLevelFilter = field(init=False, repr=False, default=None)
+    _chokes: int = field(init=False, repr=False, default=0)
+
+    @property
+    def chokes(self) -> int:
+        """Evaluations where the sampled station exceeded the sonic flow function.
+
+        Clamped to the sonic point rather than raised, so a startup transient does
+        not kill a run. Non-zero on a *converged* run means the station is placed
+        where the map cannot be read and the result should not be trusted.
+        """
+        return self._chokes
 
     def __post_init__(self) -> None:
         self._filter = InletFilter(self.inlet_lag)
@@ -389,21 +400,43 @@ class ActuatorDisk:
         mach = u_i / float(c[i])
         T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
         p01 = p_i * (T01 / T) ** gas.g_over_gm1
-        W = rho_i * u_i * float(grid.a_cell[i])
+        # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
+        # product is uniform only to O(dx^2) where the area has curvature, and
+        # that bias feeds the map lookup, so it moves the operating point rather
+        # than just a diagnostic (`PLAN.md` 3.21). Correct with mass sources
+        # too -- bleed makes the flux step by what it removes, which is what a
+        # station downstream of it should read. Free here: `residual` caches the
+        # fluxes before calling the source.
+        W = solver.mass_flux_at(self.cell - self.sample_offset)
 
         # The blade row tracks its inlet condition, not its own acoustic echo
         # (PLAN.md 3.11, 3.13). Unit DC gain, so the converged answer is
         # unchanged. W is filtered too, or one feedback path stays open.
         T01, p01, W = self._filter.update(solver.t, T01, p01, W)
 
-        phi1 = W * math.sqrt(gas.R * T01) / (area * p01)
         phi_max = max_flow_function(gas)
-        if phi1 > phi_max:
-            raise ValueError(
-                f"disk at cell {self.cell} sampled a choked inlet: flow function {phi1:.6g} "
-                f"exceeds the sonic maximum {phi_max:.6g} at W={W:.6g} kg/s, "
-                f"p01={p01:.6g} Pa, T01={T01:.6g} K. The map cannot be evaluated there"
-            )
+        w_max = phi_max * area * p01 / math.sqrt(gas.R * T01)
+        if W > w_max:
+            # Clamped and counted, not raised — the same contract the reverse-flow
+            # guard above uses, and for the same reason. A startup transient can
+            # graze the sonic limit at a station placed close to the disk: at
+            # sample_offset 1 the sampled p01 dips to 95.2 kPa against an inlet
+            # 101.3 kPa and the flow function lands 0.005% over. Killing a run for
+            # that is brittle, and an engine transient will graze these limits
+            # routinely.
+            #
+            # The clamp is on W rather than on the flow function because
+            # `compressor_source_terms` re-derives the station states from W and
+            # would reject the same point again a few lines later. Clamping the
+            # mass flow says the physical thing: the station cannot pass more
+            # than sonic, so this is the nearest state it can actually be in.
+            #
+            # A run that records chokes is not to be trusted without looking at
+            # them; `chokes` is public so a caller can assert on it, and a
+            # *converged* run should show none.
+            self._chokes += 1
+            W = w_max
+        phi1 = W * math.sqrt(gas.R * T01) / (area * p01)
 
         PR, eta = self.compressor_map.evaluate(phi1)
         Fx, SWx = compressor_source_terms(T01, p01, W, PR, eta, area, area, gas)
@@ -696,7 +729,7 @@ class InletFlowCompressor:
     _filter: InletFilter = field(init=False, repr=False, default=None)
     _calls: int = field(init=False, repr=False, default=0)
     _reversals: int = field(init=False, repr=False, default=0)
-    _levels: "LocalLevelFilter" = field(init=False, repr=False, default=None)
+    _levels: LocalLevelFilter = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         self._filter = InletFilter(self.inlet_lag)
@@ -739,7 +772,14 @@ class InletFlowCompressor:
         mach = u_i / float(c[i])
         T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
         p01 = p_i * (T01 / T) ** gas.g_over_gm1
-        W = rho_i * u_i * float(grid.a_cell[i])
+        # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
+        # product is uniform only to O(dx^2) where the area has curvature, and
+        # that bias feeds the map lookup, so it moves the operating point rather
+        # than just a diagnostic (`PLAN.md` 3.21). Correct with mass sources
+        # too -- bleed makes the flux step by what it removes, which is what a
+        # station downstream of it should read. Free here: `residual` caches the
+        # fluxes before calling the source.
+        W = solver.mass_flux_at(self.cell - self.sample_offset)
 
         # A startup transient can momentarily reverse the flow at the sampling
         # station. The map has no meaning there, so the source is switched off
@@ -913,7 +953,14 @@ class UnsteadyMappedCompressor:
         mach = u_i / float(c[i])
         T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
         p01 = p_i * (T01 / T) ** gas.g_over_gm1
-        W = rho_i * u_i * float(grid.a_cell[i])
+        # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
+        # product is uniform only to O(dx^2) where the area has curvature, and
+        # that bias feeds the map lookup, so it moves the operating point rather
+        # than just a diagnostic (`PLAN.md` 3.21). Correct with mass sources
+        # too -- bleed makes the flux step by what it removes, which is what a
+        # station downstream of it should read. Free here: `residual` caches the
+        # fluxes before calling the source.
+        W = solver.mass_flux_at(self.cell - self.sample_offset)
 
         if W <= 0.0:
             self._reversals += 1
