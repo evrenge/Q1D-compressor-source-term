@@ -1189,6 +1189,74 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.31 The full sweep: ECMF keying solves rank deficiency completely and loses high pressure ratio
+
+§3.30's closure, swept over the same grid as §3.27 — every tabulated speed line,
+seven positions including both β ends, `densify` 36, single disk, 201 cells.
+
+| map | PR range | ECMF at t−1 | inlet `Wc` (§3.27) |
+| --- | --- | --- | --- |
+| `SubsonicCompressor` | 1.1–3.1 | **84/84** | 80/84 |
+| `TranssonicCompressor` | 0.9–3.1 | **63/63**, refused lines **35/35** | 20/45; five lines unbuildable |
+| `HighPqPCompr` | 3.1–28.9 | **21/70**, refused lines **0/35** | 19/25 on the lines it could build |
+
+**Rank deficiency is solved, completely.** Every line the inverse cannot invert —
+five on `TranssonicCompressor`, including Nc 1.144 where `Wc` spans 9.97e−03 over
+the whole β range — now holds at *every* position including both β ends. That was
+the open problem from §3.26 through §3.29 and it is closed.
+
+**High pressure ratio is not, and is worse than before.** `HighPqPCompr` above
+Nc 0.900 is entirely dead: Nc 0.975 and 1.000 and 1.025 are 7/7 DIED, at PR 15 to
+29. The inverse closure held **PR 14.972** on this map at Nc 0.925 (§3.27). So
+this is a capability *lost*, not merely one not gained.
+
+The boundary is sharp and it is the line's pressure ratio, not its position:
+
+| line PR range | cells held |
+| --- | --- |
+| ≤ 6.5 | 7/7, every line, all four maps |
+| 5–8 | 5–6/7 |
+| 6.4–10.2 | 1–3/7 |
+| ≥ 8.8 | 0/7 |
+
+**Three explanations tested and refuted.**
+
+*The exit station's discretisation error.* It is real and it grows with PR —
+measured against what the disk intends, `p₀₂` is off by −6.6e−04 at PR 2.14,
++2.0e−03 at PR 3.95, +4.0e−03 at PR 6.29, +6.4e−03 at PR 8.12. But refining the
+mesh at a failing cell does not help: `HighPqPCompr` Nc 0.850 f 0.5 gives
++2.103e−01 at 201 cells and +2.027e−01 at 401, a 3.6% change. Anything that
+shrinks with the mesh is therefore excluded — which also excludes the t−1
+transport delay, since `dt` falls with the mesh too.
+
+*The map's loop gain.* §3.9 measured `−dlnPR/dlnECMF` at 0.90–1.10 and I argued
+the t−1 read makes it irrelevant. That argument is wrong — a lag turns an
+algebraic loop into an explicit iteration `x_{n+1} = f(x_n)`, which still diverges
+when `|f′| > 1` — but the gain does not separate the data either:
+
+| line | median gain | PR | result |
+| --- | --- | --- | --- |
+| `TranssonicCompressor` Nc 1.144 | **1.065** | 2.49 | **7/7** |
+| `HighPqPCompr` Nc 0.850 | **1.018** | 8.60 | 1/7 |
+
+A line at gain 1.065 is perfect while one at 1.018 fails. Gain is not the
+discriminator; pressure ratio is.
+
+**What is left.** The failure is mesh-independent, gain-independent and
+PR-dependent. That is as far as the measurements go, and no fourth hypothesis is
+offered here. Note that §3.14 records a limit of the same shape from a different
+direction — "the constraint is on the *total* pressure ratio of the duct rather
+than the stage" — and §3.16/§3.18 lifted it for the inlet closure via similarity
+scaling. `EcmfCompressor` has similarity scaling on by default, so whatever this
+is, it is not that.
+
+**Practical consequence.** Neither closure covers the map library. Inlet `Wc`
+handles high pressure ratio and refuses 13 of 45 speed lines; ECMF at t−1 handles
+every line and dies above PR ≈ 7. Below PR 3 the ECMF closure is flawless over
+147 consecutive cells. A component that selects on the map's PR range would cover
+everything measured, but that is a workaround, and the high-PR cause should be
+found rather than routed around.
+
 ### 3.30 Key on ECMF, read it one step behind — and most of §3.26–§3.29 was wrong
 
 Two observations from review, neither of which I had tested:
@@ -1296,7 +1364,9 @@ measurable and should be measured, not predicted.
   The root exists and is well posed on a vertical line. Its span correlation is
   real but the mechanism attached to it is not.
 
-**Open.** `HighPqPCompr` Nc 0.925 f 0.50 (PR ≈ 13) dies at step 964, and
+**Open — and §3.31 measures how open.** The full sweep says this closure is
+perfect below PR ≈ 3 and dead above PR ≈ 7, losing capability the inlet closure
+had. `HighPqPCompr` Nc 0.925 f 0.50 (PR ≈ 13) dies at step 964, and
 `TwoStgRadialCompr` Nc 0.600 f 0.85 settles at 2.12e−06, just outside the gate.
 Both are lines the inverse could not run at all, so neither is a regression — but
 neither is finished either. The full four-map sweep with this closure has not
