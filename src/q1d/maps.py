@@ -392,6 +392,49 @@ class ScaledMap:
     def corrected_speed(self) -> np.ndarray:
         return self.inner.corrected_speed
 
+    # The tabulated arrays, scaled the same way a looked-up point is, so that a
+    # scaled stage can be converted to an :class:`ECMFMap` like any other map.
+    # Without these, staging is confined to the β-driven closure: `from_beta_map`
+    # reads the grids directly and a `ScaledMap` had none to read, so a
+    # multistage machine could not use the β-free runtime at all.
+    #
+    # `scale` is a ratio of corrected flows, so it multiplies `Wc` and — since
+    # `ECMF = Wc·√τ/PR` with τ and PR untouched — `ecmf` by the same factor. `PR`,
+    # `corrected_work` and `efficiency` are intensive and do not scale: the stage
+    # is the same machine passing a different flow, not a different machine.
+
+    @property
+    def PR(self) -> np.ndarray:
+        return self.inner.PR
+
+    @property
+    def Wc(self) -> np.ndarray:
+        return self.inner.Wc * self.scale
+
+    @property
+    def ecmf(self) -> np.ndarray:
+        return self.inner.ecmf * self.scale
+
+    @property
+    def corrected_work(self) -> np.ndarray:
+        return self.inner.corrected_work
+
+    @property
+    def efficiency(self) -> np.ndarray:
+        return self.inner.efficiency
+
+    @property
+    def gas(self) -> PerfectGas:
+        return self.inner.gas
+
+    @property
+    def kind(self) -> str:
+        return self.inner.kind
+
+    @property
+    def repaired_efficiency(self) -> tuple[tuple[int, int], ...]:
+        return self.inner.repaired_efficiency
+
     def _rescale(self, p: MapPoint) -> MapPoint:
         return replace(p, Wc=p.Wc * self.scale, ecmf=p.ecmf * self.scale)
 
