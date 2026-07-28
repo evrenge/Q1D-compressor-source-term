@@ -17,6 +17,7 @@ the geometric source, and the measured cost was **170×** in converged mass flow
 """
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ import pytest
 from q1d.analytic import state_from_flux, static_from_stagnation
 from q1d.boundary import StagnationInletStaticOutlet
 from q1d.compressor import CompositeSource, FlowMatchedCompressor
+from q1d.design import split_equal_work
 from q1d.gas import PerfectGas
 from q1d.grid import Grid
 from q1d.maps import P_REF, T_REF, ScaledMap, load_beta_map
@@ -232,3 +234,71 @@ def test_the_c1_taper_beats_the_piecewise_linear_one():
     assert abs(smooth["err"]) < 0.1 * abs(kinked["err"]), (
         f"C1 {smooth['err']:+.3e} against piecewise-linear {kinked['err']:+.3e}"
     )
+
+
+# --- splitting one machine, as opposed to chaining several -------------------
+
+
+class TestSplitEqualWork:
+    """One map point spread over several nodes, equal Δh₀ each.
+
+    Distinct from `ScaledMap` stacking, which chains *different* machines and
+    holds `PR` and *corrected* work constant while actual Δh₀ grows with θ. This
+    holds actual work constant and exists so that a station can be opened up
+    inside a single machine — interstage bleed being the motivating case.
+    """
+
+    @staticmethod
+    def point(name="SubsonicCompressor", speed=SPEED, frac=FRAC):
+        m = load_beta_map(MAP.parent / f"{name}.xlsx", GAS).densify(9)
+        e = m._speed_line(speed)[0]
+        lo, hi = float(e.min()), float(e.max())
+        return m, m.evaluate_at_ecmf(lo + frac * (hi - lo), speed)
+
+    def test_the_work_is_split_equally(self):
+        m, pt = self.point()
+        st = split_equal_work(pt, 4, 288.15, 101325.0, GAS, kind=m.kind)
+        dh = [GAS.cp * (st[i + 1][0] - st[i][0]) for i in range(4)]
+        assert dh[0] == pytest.approx(dh[-1], rel=1e-12), "that is the whole point"
+        assert sum(dh) == pytest.approx(pt.corrected_work * (288.15 / T_REF), rel=1e-12)
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4, 6, 8])
+    def test_the_pressure_ratio_survives_the_split(self, n):
+        """The property that makes the split mean anything.
+
+        Polytropic efficiency composes exactly, so `prod(PR_k)` telescopes to
+        `(T0_n/T0_0)^(eta_p/kappa)` and does not depend on the node count. Split
+        on *isentropic* efficiency instead and a compressor loses 8.8% of its
+        pressure ratio at 2 nodes and 16% at 6 — a different machine.
+        """
+        m, pt = self.point()
+        st = split_equal_work(pt, n, 288.15, 101325.0, GAS, kind=m.kind)
+        assert st[-1][1] / st[0][1] == pytest.approx(pt.PR, rel=1e-12)
+
+    @pytest.mark.parametrize("n", [1, 2, 5])
+    def test_the_exit_temperature_does_not_depend_on_the_node_count(self, n):
+        m, pt = self.point()
+        st = split_equal_work(pt, n, 288.15, 101325.0, GAS, kind=m.kind)
+        assert st[-1][0] == pytest.approx(288.15 + pt.corrected_work / GAS.cp, rel=1e-12)
+
+    def test_the_pressure_falls_monotonically_through_a_split_turbine(self):
+        # A synthetic turbine point: negative work, PR stored as expansion ratio.
+        pt = replace(
+            self.point()[1], corrected_work=-120_000.0, PR=3.0, efficiency=0.88
+        )
+        st = split_equal_work(pt, 5, 1600.0, 1200e3, GAS, kind="turbine")
+        p = [s[1] for s in st]
+        T = [s[0] for s in st]
+        assert all(b < a for a, b in zip(p[:-1], p[1:], strict=True)), "expansion must fall"
+        assert all(b < a for a, b in zip(T[:-1], T[1:], strict=True)), "and cool"
+        assert p[0] / p[-1] == pytest.approx(3.0, rel=1e-12)
+
+    def test_it_refuses_an_unusable_efficiency(self):
+        _, pt = self.point()
+        with pytest.raises(ValueError, match="usable efficiency"):
+            split_equal_work(replace(pt, efficiency=1.4), 2, 288.15, 101325.0, GAS)
+
+    def test_it_refuses_a_zero_node_split(self):
+        _, pt = self.point()
+        with pytest.raises(ValueError, match="n_nodes must be"):
+            split_equal_work(pt, 0, 288.15, 101325.0, GAS)

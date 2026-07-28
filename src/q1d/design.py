@@ -223,6 +223,113 @@ def design_from_map(
     )
 
 
+def split_equal_work(
+    point: MapPoint,
+    n_nodes: int,
+    T01: float,
+    p01: float,
+    gas: PerfectGas,
+    kind: str = "compressor",
+) -> list[tuple[float, float]]:
+    """Split ONE map point's work across ``n_nodes`` disks, equal Δh₀ each.
+
+    This is not stage stacking and does not replace it. The two answer different
+    questions:
+
+    * :class:`~q1d.maps.ScaledMap` chains **different machines** — successive
+      low-PR maps, each scaled to its own inlet corrected flow, every stage at
+      the same *relative* point on its own map. That holds `PR` and *corrected*
+      work constant and lets actual Δh₀ grow with θ: on `SubsonicCompressor` at
+      PR 2.2177 a stage 8 does **7.19×** the actual work of stage 1
+      (``PLAN.md`` §3.43).
+    * This splits **one machine** — a single high-PR map point — into several
+      nodes doing equal actual work, so that something can be placed *between*
+      them. Interstage bleed is the motivating case: to model it the machine has
+      to be opened up at a station that the map does not itself expose.
+
+    Equal Δh₀ per node, so with ``n`` nodes each adds ``Δh₀/n`` and
+
+    .. math::
+
+        T_{0,k+1} = T_{0,k} + \frac{\Delta h_0}{n\,c_p},
+        \qquad
+        PR_k = \left(1 + \frac{\eta\,\Delta h_0}{n\,c_p T_{0,k}}\right)^{1/\kappa}
+
+    for a compressor, and the expansion form for a turbine. ``PR_k`` therefore
+    **falls** along the chain even though the work per node is constant, because
+    the same enthalpy rise buys less pressure ratio from hotter gas.
+
+    **The split is done on polytropic efficiency, and it has to be.** Isentropic
+    efficiency is not additive: hold it constant per node and a compressor cut
+    into ``n`` equal-work pieces *under*-delivers pressure ratio, because each
+    node compresses gas the node before it already heated. Measured on
+    `HighPqPCompr` at PR 21.846 — **−8.8% at 2 nodes, −16% at 6** — with the
+    mirror-image *over*-delivery on a turbine (reheat). A split that changes the
+    machine's pressure ratio by 16% is not a split of that machine.
+
+    Polytropic efficiency is defined per infinitesimal step and therefore
+    composes exactly. With ``T₀,k₊₁/T₀,k`` fixed by the equal work,
+
+    .. math::
+
+        PR_k = \left(\frac{T_{0,k+1}}{T_{0,k}}\right)^{\eta_p/\kappa}
+        \quad\Longrightarrow\quad
+        \prod_k PR_k = \left(\frac{T_{0,n}}{T_{0,0}}\right)^{\eta_p/\kappa}
+
+    which is **independent of ``n``** — the product telescopes. So the chain
+    reproduces the map's own pressure ratio at any node count, which is the
+    property that makes the split mean anything. ``η_p`` is derived from the
+    map's isentropic ``η`` and ``PR`` rather than supplied.
+
+    Returns ``n_nodes + 1`` stagnation stations ``(T₀, p₀)``, inlet first.
+    """
+    if n_nodes < 1:
+        raise ValueError(f"n_nodes must be >= 1, got {n_nodes}")
+    if T01 <= 0.0 or p01 <= 0.0:
+        raise ValueError(f"inlet stagnation state must be positive, got {T01!r}, {p01!r}")
+    eta = float(point.efficiency)
+    if not 0.0 < eta < 1.0:
+        raise ValueError(
+            f"splitting needs a usable efficiency, got eta={eta:.6g}. Outside (0, 1) "
+            f"the isentropic bookkeeping below has no meaning"
+        )
+
+    dh0_total = point.corrected_work * (T01 / T_REF)
+    k = gas.gm1_over_g
+    pr = float(point.PR)
+
+    # Polytropic efficiency implied by the map's isentropic pair, so the caller
+    # supplies nothing that is not already in the map. Compressor:
+    #   tau = 1 + (PR^k - 1)/eta  and  tau = PR^(k/eta_p).
+    # Turbine, with PR the expansion ratio p01/p02:
+    #   tau = 1 - eta*(1 - PR^-k)  and  tau = PR^(-k*eta_p).
+    tau_total = 1.0 + dh0_total / (gas.cp * T01)
+    if tau_total <= 0.0:
+        raise InfeasibleOperatingPoint(
+            f"splitting gives a non-physical overall temperature ratio {tau_total:.6g}"
+        )
+    if kind == "turbine":
+        eta_p = math.log(tau_total) / (-k * math.log(pr))
+    else:
+        eta_p = k * math.log(pr) / math.log(tau_total)
+
+    dh0 = dh0_total / n_nodes
+    stations = [(T01, p01)]
+    for _ in range(n_nodes):
+        T0, p0 = stations[-1]
+        T0n = T0 + dh0 / gas.cp
+        if T0n <= 0.0:
+            raise InfeasibleOperatingPoint(
+                f"node {len(stations)} would reach T0={T0n:.6g} K: the split asks for "
+                f"more enthalpy than the flow carries"
+            )
+        # Same exponent both ways; for a turbine eta_p enters reciprocally
+        # because PR is stored the other way up, and p0 falls.
+        step = (T0n / T0) ** (eta_p / k) if kind != "turbine" else (T0 / T0n) ** (1.0 / (k * eta_p))
+        stations.append((T0n, p0 * step if kind != "turbine" else p0 / step))
+    return stations
+
+
 def reachable_ecmf_range(
     beta_map: BetaMap,
     corrected_speed: float,
