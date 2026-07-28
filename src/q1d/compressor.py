@@ -26,7 +26,13 @@ from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
-from .analytic import compressor_source_terms, flow_function, max_flow_function
+from .analytic import (
+    add_stagnation_enthalpy,
+    compressor_source_terms,
+    flow_function,
+    max_flow_function,
+    stagnation_from_static,
+)
 from .gas import PerfectGas
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -464,9 +470,7 @@ class ActuatorDisk:
         idx = self.cell - self.sample_offset
         st = solver.station_state_at(idx)
         T = st.p / (st.rho * gas.R)
-        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
-        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = st.p * (T01 / T) ** gas.g_over_gm1
+        T01, p01 = stagnation_from_static(T, st.p, st.u, gas)
         # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
         # product is uniform only to O(dx^2) where the area has curvature, and
         # that bias feeds the map lookup, so it moves the operating point rather
@@ -606,9 +610,7 @@ class MappedCompressor:
         gas = solver.gas
         rho, u, p, c = solver.primitives()
         T = float(p[i]) / (float(rho[i]) * gas.R)
-        mach = float(u[i]) / float(c[i])
-        T0 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p0 = float(p[i]) * (T0 / T) ** gas.g_over_gm1
+        T0, p0 = stagnation_from_static(T, float(p[i]), float(u[i]), gas)
         return T0, p0, float(rho[i]) * float(u[i]) * float(solver.grid.a_cell[i])
 
     def __call__(self, solver: Solver) -> np.ndarray:
@@ -659,7 +661,7 @@ class MappedCompressor:
             self._cw += r * (point.corrected_work - self._cw)
 
         dh0 = self._cw * theta
-        T02 = T01 + dh0 / gas.cp
+        T02 = add_stagnation_enthalpy(T01, dh0, gas)
         p02 = _exit_p0(self._pr, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
@@ -839,9 +841,7 @@ class InletFlowCompressor:
         idx = self.cell - self.sample_offset
         st = solver.station_state_at(idx)
         T = st.p / (st.rho * gas.R)
-        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
-        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = st.p * (T01 / T) ** gas.g_over_gm1
+        T01, p01 = stagnation_from_static(T, st.p, st.u, gas)
         # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
         # product is uniform only to O(dx^2) where the area has curvature, and
         # that bias feeds the map lookup, so it moves the operating point rather
@@ -866,7 +866,7 @@ class InletFlowCompressor:
         point = self.beta_map.evaluate_at_Wc(Wc, self.corrected_speed)
 
         dh0 = point.corrected_work * theta
-        T02 = T01 + dh0 / gas.cp
+        T02 = add_stagnation_enthalpy(T01, dh0, gas)
         p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
@@ -1023,9 +1023,7 @@ class UnsteadyMappedCompressor:
         idx = self.cell - self.sample_offset
         st = solver.station_state_at(idx)
         T = st.p / (st.rho * gas.R)
-        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
-        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = st.p * (T01 / T) ** gas.g_over_gm1
+        T01, p01 = stagnation_from_static(T, st.p, st.u, gas)
         # The conserved mass flux, not rho*u*A(x_centre). The cell-centred
         # product is uniform only to O(dx^2) where the area has curvature, and
         # that bias feeds the map lookup, so it moves the operating point rather
@@ -1059,7 +1057,7 @@ class UnsteadyMappedCompressor:
         point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
 
         dh0 = point.corrected_work * theta
-        T02 = T01 + dh0 / gas.cp
+        T02 = add_stagnation_enthalpy(T01, dh0, gas)
         p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
@@ -1295,9 +1293,7 @@ class FlowMatchedCompressor:
         if w <= 0.0 or st.p <= 0.0 or st.rho <= 0.0:
             return math.nan
         t = st.p / (st.rho * gas.R)
-        m2 = st.u * st.u / (gas.gamma * gas.R * t)
-        t02 = t * (1.0 + 0.5 * gas.gm1 * m2)
-        p02 = st.p * (t02 / t) ** gas.g_over_gm1
+        t02, p02 = stagnation_from_static(t, st.p, st.u, gas)
         pr, tau = p02 / p01, t02 / T01
         if pr <= 0.0 or tau <= 0.0:
             return math.nan
@@ -1323,9 +1319,7 @@ class FlowMatchedCompressor:
         idx = self.cell - self.sample_offset
         st = solver.station_state_at(idx)
         T = st.p / (st.rho * gas.R)
-        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
-        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = st.p * (T01 / T) ** gas.g_over_gm1
+        T01, p01 = stagnation_from_static(T, st.p, st.u, gas)
         W = solver.mass_flux_at(idx)
 
         if W <= 0.0:
@@ -1397,7 +1391,7 @@ class FlowMatchedCompressor:
 
         point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
         dh0 = point.corrected_work * theta
-        T02 = T01 + dh0 / gas.cp
+        T02 = add_stagnation_enthalpy(T01, dh0, gas)
         p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
@@ -1664,9 +1658,7 @@ class EcmfCompressor:
         if w <= 0.0 or st.p <= 0.0 or st.rho <= 0.0:
             return math.nan
         t = st.p / (st.rho * gas.R)
-        m2 = st.u * st.u / (gas.gamma * gas.R * t)
-        t02 = t * (1.0 + 0.5 * gas.gm1 * m2)
-        p02 = st.p * (t02 / t) ** gas.g_over_gm1
+        t02, p02 = stagnation_from_static(t, st.p, st.u, gas)
         pr, tau = p02 / p01, t02 / T01
         if pr <= 0.0 or tau <= 0.0:
             return math.nan
@@ -1696,9 +1688,7 @@ class EcmfCompressor:
         idx = self.cell - self.sample_offset
         st = solver.station_state_at(idx)
         T = st.p / (st.rho * gas.R)
-        mach = st.u / math.sqrt(gas.gamma * gas.R * T)
-        T01 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
-        p01 = st.p * (T01 / T) ** gas.g_over_gm1
+        T01, p01 = stagnation_from_static(T, st.p, st.u, gas)
         W = solver.mass_flux_at(idx)
 
         if W <= 0.0:
@@ -1741,7 +1731,7 @@ class EcmfCompressor:
 
         point = self._point
         dh0 = point.corrected_work * theta
-        T02 = T01 + dh0 / gas.cp
+        T02 = add_stagnation_enthalpy(T01, dh0, gas)
         p02 = _exit_p0(point.PR, p01, _map_kind(self.ecmf_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)

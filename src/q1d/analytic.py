@@ -605,6 +605,28 @@ def flow_function_at(M: float, gas, T0: float) -> float:
     return flow_function_real(M, T0, gas)
 
 
+def stagnation_from_static(T: float, p: float, u: float, gas) -> tuple[float, float]:
+    """``(T₀, p₀)`` from a static state and a velocity, for either gas.
+
+    ``T₀ = T(1 + ½(γ−1)M²)`` and ``p₀ = p(T₀/T)^{γ/(γ−1)}`` both assume a
+    constant ``γ``. The general statements are ``h(T₀) = h(T) + u²/2`` and
+    ``p₀/p = exp((s°(T₀) − s°(T))/R)``, which is what a NASA9 gas needs.
+    """
+    if _is_calorically_perfect(gas):
+        mach = u / math.sqrt(gas.gamma * gas.R * T)
+        T0 = T * (1.0 + 0.5 * gas.gm1 * mach * mach)
+        return T0, p * (T0 / T) ** gas.g_over_gm1
+    T0 = gas.temperature_from_enthalpy(gas.enthalpy(T) + 0.5 * u * u, guess=T)
+    return T0, p * math.exp((gas.entropy_ref(T0) - gas.entropy_ref(T)) / gas.R)
+
+
+def add_stagnation_enthalpy(T0: float, dh0: float, gas) -> float:
+    """``T₀`` after adding ``Δh₀``. ``T₀ + Δh₀/cp`` only when ``cp`` is constant."""
+    if _is_calorically_perfect(gas):
+        return T0 + dh0 / gas.cp
+    return gas.temperature_from_enthalpy(gas.enthalpy(T0) + dh0, guess=T0)
+
+
 def exit_stagnation_from_map(
     T01: float, p01: float, PR: float, eta: float, gas, kind: str = "compressor"
 ) -> tuple[float, float, float]:

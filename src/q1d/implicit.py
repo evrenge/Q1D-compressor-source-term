@@ -184,7 +184,12 @@ class ImplicitStepper:
         rho = s.cv[0] / a
         if np.any(rho[1:-1] <= 0.0) or not np.all(np.isfinite(x)):
             return False
-        p = s.gas.gm1 * (s.cv[2] / a - 0.5 * s.cv[1] * s.cv[1] / (s.cv[0] * a))
+        if hasattr(s.gas, "gm1"):
+            p = s.gas.gm1 * (s.cv[2] / a - 0.5 * s.cv[1] * s.cv[1] / (s.cv[0] * a))
+        else:
+            from .solver import _pressure_real
+
+            p = _pressure_real(s.gas, s.cv, a)
         if np.any(p[1:-1] <= 0.0) or not np.all(np.isfinite(p[1:-1])):
             return False
         s.p[:] = p
