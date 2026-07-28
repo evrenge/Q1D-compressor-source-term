@@ -643,6 +643,74 @@ class ECMFMap:
             kind=m.kind,
         )
 
+    def save(self, path: str | Path) -> Path:
+        """Write the built table to a ``.npz`` so it is not rebuilt every run.
+
+        A map is static data. Building one means parsing a workbook, refining
+        the ``(β, Nc)`` grid with PCHIP, re-deriving η and ECMF, and sorting onto
+        the key — 0.06 s to 0.70 s per map depending on size, and it produces
+        exactly the same table every time. A solver that reads a map per case
+        pays that per case, for nothing.
+
+        Stored: the key and value grids, the speed axis, ``key_field``, ``kind``,
+        and the gas ``gamma``/``cp`` the table was derived with. The gas matters
+        because ``corrected_work`` and ``ecmf`` were computed from it — loading a
+        table against a different gas would be silently wrong, so :meth:`load`
+        checks rather than trusts.
+        """
+        path = Path(path)
+        # Uncompressed on purpose: `savez_compressed` costs more CPU than it
+        # saves I/O here. Measured on `SubsonicCompressor` at densify 36 --
+        # 0.058 s to load compressed against 0.009 s raw, and on the largest
+        # turbine map the compressed load (0.179 s) is *slower than rebuilding
+        # the table from the workbook* (0.112 s), which defeats the point.
+        np.savez(
+            path,
+            name=np.array(self.name),
+            corrected_speed=self.corrected_speed,
+            key=self.key,
+            PR=self.PR,
+            corrected_work=self.corrected_work,
+            efficiency=self.efficiency,
+            key_field=np.array(self.key_field),
+            kind=np.array(self.kind),
+            gamma=np.array(self.gas.gamma),
+            cp=np.array(self.gas.cp),
+        )
+        return path if path.suffix else path.with_suffix(".npz")
+
+    @classmethod
+    def load(cls, path: str | Path, gas: PerfectGas | None = None) -> ECMFMap:
+        """Read back a table written by :meth:`save`.
+
+        ``gas`` is optional; when given it is *checked* against the one the table
+        was built with rather than substituted, because the stored
+        ``corrected_work`` and ``ecmf`` already carry that gas's constants.
+        """
+        with np.load(Path(path), allow_pickle=False) as z:
+            stored = PerfectGas(float(z["gamma"]), float(z["cp"]))
+            if gas is not None and (
+                gas.gamma != stored.gamma or gas.cp != stored.cp
+            ):
+                raise ValueError(
+                    f"{path} was built with gamma={stored.gamma!r}, cp={stored.cp!r}; "
+                    f"asked to load it as gamma={gas.gamma!r}, cp={gas.cp!r}. The stored "
+                    f"corrected work and ECMF already carry the first pair"
+                )
+            # Column-major on the way back in, for the same reason `from_beta_map`
+            # builds it that way: `evaluate` slices columns (§3.37).
+            return cls(
+                name=str(z["name"]),
+                corrected_speed=np.ascontiguousarray(z["corrected_speed"]),
+                key=np.asfortranarray(z["key"]),
+                PR=np.asfortranarray(z["PR"]),
+                corrected_work=np.asfortranarray(z["corrected_work"]),
+                efficiency=np.asfortranarray(z["efficiency"]),
+                gas=stored,
+                key_field=str(z["key_field"]),
+                kind=str(z["kind"]),
+            )
+
     def evaluate(self, ecmf: float, corrected_speed: float) -> MapPoint:
         """``PR`` and corrected work at a measured ECMF. No β anywhere."""
         n = self.corrected_speed

@@ -291,3 +291,55 @@ class TestOffTableIsCounted:
         for _ in range(4):
             assert e.evaluate(x, nc).PR == pytest.approx(first, rel=1e-12)
         assert int(e.off_table[0]) == 5
+
+
+class TestItCanBeSavedAndReloaded:
+    """A map is static data and should not be rebuilt every run.
+
+    Building one parses a workbook, refines the ``(β, Nc)`` grid with PCHIP,
+    re-derives η and ECMF and sorts onto the key — 0.06 s to 0.70 s per map,
+    producing an identical table every time. A solver that reads a map per case
+    pays that per case for nothing. Reload is 0.008 s to 0.05 s.
+    """
+
+    def test_the_reloaded_table_is_identical(self, tmp_path):
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        back = ECMFMap.load(e.save(tmp_path / "m.npz"), GAS)
+        for a in ("corrected_speed", "key", "PR", "corrected_work", "efficiency"):
+            assert np.array_equal(getattr(e, a), getattr(back, a)), a
+        assert (back.name, back.kind, back.key_field) == (e.name, e.kind, e.key_field)
+
+    def test_it_evaluates_the_same_including_off_table(self, tmp_path):
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        back = ECMFMap.load(e.save(tmp_path / "m.npz"), GAS)
+        worst = 0.0
+        for j in range(0, len(e.corrected_speed), 11):
+            nc = float(e.corrected_speed[j])
+            lo, hi = float(e.key[0, j]), float(e.key[-1, j])
+            for f in np.linspace(-0.2, 1.2, 15):
+                q = lo + f * (hi - lo)
+                a, b = e.evaluate(q, nc), back.evaluate(q, nc)
+                for x, y in ((a.PR, b.PR), (a.Wc, b.Wc), (a.ecmf, b.ecmf),
+                             (a.corrected_work, b.corrected_work)):
+                    worst = max(worst, abs(x - y))
+        assert worst == 0.0, f"reload changed the answer by {worst:.3e}"
+
+    def test_the_reloaded_table_is_still_column_major(self, tmp_path):
+        """§3.37: a C-ordered table makes every lookup O(n) in a memcpy."""
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        back = ECMFMap.load(e.save(tmp_path / "m.npz"), GAS)
+        for a in ("key", "PR", "corrected_work", "efficiency"):
+            assert getattr(back, a).flags["F_CONTIGUOUS"], a
+
+    def test_loading_against_the_wrong_gas_is_refused(self, tmp_path):
+        """`corrected_work` and `ecmf` already carry the gas they were built
+        with, so substituting another silently changes what the table means."""
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        p = e.save(tmp_path / "m.npz")
+        with pytest.raises(ValueError, match="was built with"):
+            ECMFMap.load(p, PerfectGas(1.33, 1150.0))
+
+    def test_the_gas_comes_back_when_none_is_given(self, tmp_path):
+        e = ECMFMap.from_beta_map(beta_map(MAPS[0]))
+        back = ECMFMap.load(e.save(tmp_path / "m.npz"))
+        assert (back.gas.gamma, back.gas.cp) == (GAS.gamma, GAS.cp)
