@@ -1634,6 +1634,15 @@ class EcmfCompressor:
         return 0 if counter is None else int(counter[0])
 
     def _exit_ecmf(self, solver, gas, T01, p01, theta, delta) -> float:
+        """The key this map wants, measured from the field at both stations.
+
+        A compressor is keyed on ``ECMF = Wc·√τ/PR``; a turbine on its expansion
+        ratio ``p₀₁/p₀₂``, because ECMF is monotonic in β on only 17 of 64
+        turbine speed lines where ``PR`` manages 64 of 64 (`PLAN.md` §3.38).
+        Both come from the same two readings — the inlet stagnation state the
+        disk was given, and the exit station ``exit_offset`` cells downstream —
+        so keying a turbine costs a branch, not a mechanism.
+        """
         idx = self.cell + self.n_smear - 1 + self.exit_offset
         if idx >= solver.grid.n_interior:
             raise ValueError(
@@ -1654,6 +1663,10 @@ class EcmfCompressor:
         pr, tau = p02 / p01, t02 / T01
         if pr <= 0.0 or tau <= 0.0:
             return math.nan
+        if _map_kind(self.ecmf_map) == "turbine":
+            # The expansion ratio, which is the reciprocal of what a compressor
+            # calls PR. Both tabulate above 1; they are not the same ratio.
+            return 1.0 / pr
         return (w * math.sqrt(theta) / delta) * math.sqrt(tau) / pr
 
     def __call__(self, solver: Solver) -> np.ndarray:
