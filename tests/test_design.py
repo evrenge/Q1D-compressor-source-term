@@ -221,3 +221,27 @@ def test_inlet_closure_availability_matches_the_measured_split(real_map):
         # down to 0.80. That is interpolation between a good line and a bad
         # one, not a defect of the refinement.
         assert bad and 0.79 < min(bad) <= 0.88
+
+
+def test_is_operating_point_rejects_a_machine_doing_nothing():
+    """PR <= 1 means not compressing, or not expanding. Workbook padding.
+
+    Only the arithmetic check: a cell can pass this and still be refused for
+    sitting on a flat or positively sloped characteristic, which is a real
+    result rather than bad data (PLAN.md 3.44).
+    """
+    from q1d.design import is_operating_point
+    from q1d.maps import MapPoint
+
+    def pt(pr):
+        return MapPoint(beta=0.5, corrected_speed=1.0, Wc=1.0, PR=pr,
+                        corrected_work=1.0, ecmf=1.0, efficiency=0.8)
+
+    assert is_operating_point(pt(2.2))
+    assert is_operating_point(pt(1.0001))
+    assert not is_operating_point(pt(1.0))
+    assert not is_operating_point(pt(0.957)), "LPC01 Nc 0.300 f=1.00"
+    assert not is_operating_point(pt(0.999)), "HighPqPTurbine Nc 0.000 f=0.00"
+    # A turbine stores the expansion ratio, so the same test applies unchanged.
+    assert is_operating_point(pt(3.0), kind="turbine")
+    assert not is_operating_point(pt(0.99), kind="turbine")

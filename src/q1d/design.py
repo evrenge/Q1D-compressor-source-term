@@ -223,6 +223,27 @@ def design_from_map(
     )
 
 
+def is_operating_point(point: MapPoint, kind: str = "compressor") -> bool:
+    """Does this map cell describe a machine doing its job?
+
+    Both conventions store a ratio above 1 — a compressor's ``p₀₂/p₀₁``, a
+    turbine's expansion ratio ``p₀₁/p₀₂`` — so ``PR ≤ 1`` means the machine is
+    not compressing, or not expanding, at that cell.
+
+    The supplied workbooks contain such cells and they are filler rather than
+    data: `LPC01` and `LPC02` at Nc 0.300 reach ``PR`` 0.957 and 0.994 carrying
+    η of 9.4 and 17.4, and `HighPqPTurbine` at zero speed reads ``PR`` 0.999.
+    A sweep that counts them as failures is measuring the padding in the
+    workbook, not the model (``PLAN.md`` §3.44).
+
+    This is deliberately only the *arithmetic* check. Whether a point is
+    *stable* — whether the characteristic still has restoring slope there — is a
+    different question, answered by the sign of ``dPR/dECMF``, and a cell that
+    fails that one is a real refusal that should stay in the count.
+    """
+    return float(point.PR) > 1.0
+
+
 def split_equal_work(
     point: MapPoint,
     n_nodes: int,
