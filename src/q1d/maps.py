@@ -463,11 +463,13 @@ class ECMFMap:
     corrected_work: np.ndarray
     efficiency: np.ndarray
     gas: PerfectGas
-    #: Which quantity :attr:`key` holds — ``"ecmf"`` for a compressor, ``"PR"``
-    #: for a turbine. ECMF is monotonic in β on 135 of 135 compressor lines but
-    #: only 17 of 64 turbine lines, where ``PR`` manages **64 of 64**, so the
-    #: two machines want different keys and neither choice generalises.
+    #: Which quantity :attr:`key` holds. Always ``"ecmf"`` — both machines key
+    #: on it, once their thermodynamics are right (§3.40). Kept as a field
+    #: because the map records what it is keyed on rather than implying it.
     key_field: str = "ecmf"
+    #: ``"compressor"`` or ``"turbine"``: sets how ``Wc`` is recovered from the
+    #: key, since ``ECMF = Wc·√τ/PR`` for one and ``Wc·√τ·PR`` for the other.
+    kind: str = "compressor"
     #: Corrected flow, tabulated rather than derived when ``PR`` is the key.
     #: ``None`` on an ECMF-keyed map, where ``Wc`` follows from the key exactly.
     Wc: np.ndarray | None = None
@@ -508,8 +510,16 @@ class ECMFMap:
         n_speed = m.PR.shape[1]
         if n_key is not None and n_key < 2:
             raise ValueError(f"n_key must be at least 2, got {n_key}")
-        key_field = "PR" if m.kind == "turbine" else "ecmf"
-        src_key = m.PR if key_field == "PR" else m.ecmf
+        # ECMF keys BOTH machines. The claim that it could not key a turbine --
+        # monotonic on 17 of 64 lines against PR's 64 of 64 -- was measured with
+        # the compressor thermodynamics of §3.38, which gave every turbine cell
+        # the wrong tau and the reciprocal ECMF factor. With the right physics
+        # ECMF is monotonic on **64 of 64** turbine lines, and PR is the one key
+        # a turbine disk must not use: the disk asserts a pressure ratio, so
+        # keying on PR makes the pressure source an identity with no restoring
+        # force (§3.40).
+        key_field = "ecmf"
+        src_key = m.ecmf
         bad = [
             float(m.corrected_speed[j])
             for j in range(n_speed)
@@ -540,10 +550,7 @@ class ECMFMap:
         # from the key exactly -- `Wc = ECMF·PR/√τ` -- and deriving it is what
         # makes the returned point reproduce the key it was asked for to 2e-16,
         # which interpolating a fourth column would quietly give up.
-        wc = np.empty((rows, n_speed), order="F") if key_field == "PR" else None
         cols = [(pr, m.PR), (cw, m.corrected_work), (eff, m.efficiency)]
-        if wc is not None:
-            cols.append((wc, m.Wc))
         for j in range(n_speed):
             e = src_key[:, j]
             order = np.argsort(e)
@@ -566,7 +573,7 @@ class ECMFMap:
             efficiency=eff,
             gas=m.gas,
             key_field=key_field,
-            Wc=wc,
+            kind=m.kind,
         )
 
     def evaluate(self, ecmf: float, corrected_speed: float) -> MapPoint:
@@ -630,18 +637,12 @@ class ECMFMap:
         lo = float(min(self.key[0, j], self.key[0, j + 1]))
         hi = float(max(self.key[-1, j], self.key[-1, j + 1]))
         e = float(np.clip(ecmf, lo, hi))
-        if self.key_field == "PR":
-            # PR is the key, so it is returned exactly as asked; Wc comes from
-            # the table and ECMF follows. A turbine tabulates the expansion
-            # ratio p₀₁/p₀₂, so ECMF = Wc·√τ·PR — the reciprocal of the
-            # compressor factor, and getting it upside down is silent because
-            # both are dimensionally fine (§3.38).
-            pr = e
-            wc = at(j, self.Wc) * (1.0 - w) + at(j + 1, self.Wc) * w
-            ecmf_out = wc * math.sqrt(tau) * pr
-        else:
-            wc = e * pr / math.sqrt(tau)
-            ecmf_out = e
+        # Wc follows from the key exactly, which is what makes the returned
+        # point reproduce the ECMF it was asked for to machine precision. The
+        # relation is the machine's: `ECMF = Wc·√τ/PR` for a compressor storing
+        # p₀₂/p₀₁, and `Wc·√τ·PR` for a turbine storing p₀₁/p₀₂.
+        wc = e / (pr * math.sqrt(tau)) if self.kind == "turbine" else e * pr / math.sqrt(tau)
+        ecmf_out = e
         return MapPoint(
             beta=math.nan,  # deliberately absent: this map has no beta
             corrected_speed=corrected_speed,

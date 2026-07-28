@@ -1663,10 +1663,10 @@ class EcmfCompressor:
         pr, tau = p02 / p01, t02 / T01
         if pr <= 0.0 or tau <= 0.0:
             return math.nan
-        if _map_kind(self.ecmf_map) == "turbine":
-            # The expansion ratio, which is the reciprocal of what a compressor
-            # calls PR. Both tabulate above 1; they are not the same ratio.
-            return 1.0 / pr
+        # One expression for both machines. `pr` here is the *measured*
+        # p02/p01, not the map's PR, and the two conventions differ only in
+        # which way up they store that ratio -- so `Wc·√τ/pr` is ECMF for a
+        # compressor and for a turbine alike (`PLAN.md` §3.40).
         return (w * math.sqrt(theta) / delta) * math.sqrt(tau) / pr
 
     def __call__(self, solver: Solver) -> np.ndarray:
