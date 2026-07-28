@@ -106,10 +106,20 @@ class DuctDesign:
         )
 
 
-def _exit_stagnation(point: MapPoint, T01: float, p01: float, gas: PerfectGas):
+def _exit_stagnation(
+    point: MapPoint, T01: float, p01: float, gas: PerfectGas, kind: str = "compressor"
+):
+    """Exit stagnation state from a map point.
+
+    ``PR`` means different things to the two machines and both are the natural
+    convention for their own map: a compressor tabulates ``p₀₂/p₀₁``, a turbine
+    the expansion ratio ``p₀₁/p₀₂``, so that both read above 1. Using the
+    compressor form on a turbine raises the pressure while the energy equation
+    lowers the temperature — a disk that compresses and cools at once.
+    """
     theta = T01 / T_REF
     T02 = T01 + point.corrected_work * theta / gas.cp
-    return T02, point.PR * p01
+    return T02, (p01 / point.PR if kind == "turbine" else point.PR * p01)
 
 
 def design_from_map(
@@ -145,11 +155,27 @@ def design_from_map(
     theta, delta = T01 / T_REF, p01 / P_REF
 
     W = point.Wc * delta / math.sqrt(theta)
-    T02, p02 = _exit_stagnation(point, T01, p01, gas)
-    if T02 <= T01:
+    kind = getattr(beta_map, "kind", "compressor")
+    T02, p02 = _exit_stagnation(point, T01, p01, gas, kind)
+    # The direction of the temperature change is the machine's definition, so
+    # check it against the machine rather than assuming compression.
+    if kind == "turbine" and T02 >= T01:
+        raise InfeasibleOperatingPoint(
+            f"map point does work {point.corrected_work:.6g} J/kg/theta, giving "
+            f"T02={T02:.6g} K >= T01={T01:.6g} K — a turbine must expand and cool"
+        )
+    if kind != "turbine" and T02 <= T01:
         raise InfeasibleOperatingPoint(
             f"map point does work {point.corrected_work:.6g} J/kg/theta, giving "
             f"T02={T02:.6g} K <= T01={T01:.6g} K — not a compressor operating point"
+        )
+    if T02 <= 0.0:
+        raise InfeasibleOperatingPoint(
+            f"exit stagnation temperature {T02:.6g} K is non-physical: the map "
+            f"extracts {-point.corrected_work * theta:.6g} J/kg from a flow entering at "
+            f"{T01:.6g} K. Turbine maps are tabulated for turbine-entry conditions; "
+            f"running one from a standard-day inlet asks it for more enthalpy than "
+            f"the flow has"
         )
 
     from .analytic import flow_function
@@ -170,7 +196,9 @@ def design_from_map(
     # ~1.17 at design (PLAN.md Phase 1). This guard is therefore unreachable for
     # a well-formed compressor point and exists to catch a malformed one.
     phi2 = W * math.sqrt(gas.R * T02) / (area * p02)
-    if phi2 >= phi_max * CHOKE_MARGIN:
+    # A turbine's exit is the low-pressure station, so unlike a compressor it is
+    # the one that saturates first and this guard is genuinely reachable.
+    if kind != "turbine" and phi2 >= phi_max * CHOKE_MARGIN:
         raise InfeasibleOperatingPoint(
             f"exit station would choke: Phi2={phi2:.6g} against {phi_max:.6g} "
             f"(margin {CHOKE_MARGIN:.3g}) at M1={inlet_mach:.4g}. At equal areas this "
@@ -226,7 +254,7 @@ def reachable_ecmf_range(
     for target in np.linspace(lo, hi, samples):
         pt = beta_map.evaluate_at_ecmf(float(target), corrected_speed)
         W = pt.Wc * delta / math.sqrt(theta)
-        T02, p02 = _exit_stagnation(pt, T01, p01, gas)
+        T02, p02 = _exit_stagnation(pt, T01, p01, gas, getattr(beta_map, "kind", "compressor"))
         if T02 <= 0.0 or p02 <= 0.0:
             continue
         phi1 = W * math.sqrt(gas.R * T01) / (area * p01)

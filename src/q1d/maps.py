@@ -759,7 +759,11 @@ def load_beta_map(
     repaired: tuple[tuple[int, int], ...] = ()
     if kind == "turbine":
         eff = np.array(eff, dtype=float, copy=True)
-        bad = ~(eff > 0.0)
+        # 0 < eta < 1 is usable; anything else is not a physical efficiency and
+        # gets repaired and recorded. eta >= 1 matters as much as eta <= 0 here:
+        # it says the machine beats its own isentropic limit, and multiplied
+        # through it would extract more enthalpy than the expansion contains.
+        bad = ~((eff > 0.0) & (eff < 1.0))
         repaired = tuple((int(i), int(j)) for i, j in zip(*np.where(bad)))
         for j in range(eff.shape[1]):
             col = bad[:, j]

@@ -234,6 +234,30 @@ class CompositeSource:
         return out
 
 
+def _exit_p0(PR: float, p01: float, kind: str) -> float:
+    """Exit stagnation pressure from a map's ``PR``.
+
+    Both machines tabulate a ratio above 1, and they are not the same ratio: a
+    compressor stores ``p₀₂/p₀₁``, a turbine the expansion ratio ``p₀₁/p₀₂``.
+    Using the compressor form on a turbine raises the pressure while the energy
+    source lowers the temperature, giving a disk that compresses and cools at
+    once — dimensionally fine, physically impossible, and silent.
+    """
+    return p01 / PR if kind == "turbine" else PR * p01
+
+
+def _map_kind(m: object) -> str:
+    """``"turbine"`` or ``"compressor"`` for either map class.
+
+    A ``BetaMap`` carries ``kind`` directly; an ``ECMFMap`` says the same thing
+    by which quantity it is keyed on, since only a turbine is keyed on ``PR``.
+    """
+    k = getattr(m, "kind", None)
+    if k is not None:
+        return str(k)
+    return "turbine" if getattr(m, "key_field", "ecmf") == "PR" else "compressor"
+
+
 class CompressorMap(Protocol):
     """Maps inlet flow function to pressure ratio and isentropic efficiency."""
 
@@ -636,7 +660,7 @@ class MappedCompressor:
 
         dh0 = self._cw * theta
         T02 = T01 + dh0 / gas.cp
-        p02 = self._pr * p01
+        p02 = _exit_p0(self._pr, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
@@ -843,7 +867,7 @@ class InletFlowCompressor:
 
         dh0 = point.corrected_work * theta
         T02 = T01 + dh0 / gas.cp
-        p02 = point.PR * p01
+        p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
@@ -1036,7 +1060,7 @@ class UnsteadyMappedCompressor:
 
         dh0 = point.corrected_work * theta
         T02 = T01 + dh0 / gas.cp
-        p02 = point.PR * p01
+        p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
@@ -1374,7 +1398,7 @@ class FlowMatchedCompressor:
         point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
         dh0 = point.corrected_work * theta
         T02 = T01 + dh0 / gas.cp
-        p02 = point.PR * p01
+        p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
@@ -1698,7 +1722,7 @@ class EcmfCompressor:
         point = self._point
         dh0 = point.corrected_work * theta
         T02 = T01 + dh0 / gas.cp
-        p02 = point.PR * p01
+        p02 = _exit_p0(point.PR, p01, _map_kind(self.ecmf_map))
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
