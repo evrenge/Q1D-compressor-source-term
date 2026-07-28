@@ -1189,6 +1189,57 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.43 Staged chains leave the β path, and the error trend changes with them
+
+§3.21 and §3.24's staging results — six stages, OPR 119, "the error does not grow
+with stage count" — are all `FlowMatchedCompressor` with an explicit `beta0`
+seed. Staging could not use the β-free runtime at all, because
+`ECMFMap.from_beta_map` reads the tabulated grids directly and `ScaledMap`
+exposed none of them. The same gap as the turbines of §3.40, in another corner:
+the map was β-free, the machine built from it was not.
+
+`ScaledMap` now exposes its grids. `scale` is a ratio of corrected flows, so it
+multiplies `Wc` and `ecmf`; `PR`, corrected work and efficiency are intensive and
+do not scale — a stage is the same machine passing a different flow. Verified
+identical to the β path at scale 1.0, 0.5 and 0.25.
+
+**The same harness, both closures, `SubsonicCompressor`:**
+
+| stages | OPR | exit `T₀` | β path | β-free |
+| --- | --- | --- | --- | --- |
+| 1 | 2.218 | 369 K | −1.648e−06 | **−1.788e−07** |
+| 2 | 4.918 | 472 K | −2.454e−06 | **−6.981e−07** |
+| 4 | 24.188 | 773 K | −1.697e−06 | **+2.224e−07** |
+| 6 | 118.959 | 1265 K | **+4.415e−07** | +2.386e−06 |
+| 8 | 585.056 | 2072 K | **+1.198e−06** | +3.156e−06 |
+
+All four β-path values reproduce §3.24 exactly, so the harness is that section's.
+
+**There is a crossover between 4 and 6 stages**, and the trends differ rather
+than just the levels. The β path is flat in stage count — 1.6, 2.5, 1.7, 0.44,
+1.2 e−06, no direction. The β-free chain **grows monotonically past 4** — 0.18,
+0.70, 0.22, 2.4, 3.2 e−06. So §3.24's headline property, that per-stage errors do
+not accumulate, is a property of *that* closure and does not transfer. Below five
+stages β-free is 3–8× tighter; above, it is 2.6–5× worse.
+
+**What that means for how many nodes can be stacked.** Inside the 1e−06 gate:
+**four stages, OPR 24**, on the β-free closure. It keeps converging well past
+that — eight stages at OPR 585 — but at 2–3e−06. The β path holds the gate at six
+and sits just outside at eight.
+
+**And the numerical limit is not the binding one.** At eight stages the exit
+stagnation temperature is **2072 K**, past turbine-entry conditions, and the
+repeating-stage assumption — identical corrected work from every stage, which is
+what makes OPR compound geometrically to 2.2177⁸ = 585 — describes no machine
+anybody builds. The arithmetic stays self-consistent long after the model stops
+meaning anything.
+
+**Why β-free accumulates and β does not is not yet measured.** The plausible
+mechanism is that the β-free disk keys on a *measured* downstream station, so
+each stage reads a field the stages behind it are still perturbing, while the β
+path carries an internal state that is insulated from that. Plausible is not
+measured, and it should not be written down as though it were.
+
 ### 3.42 The two densification axes are not the same quantity
 
 `densify` took one factor for both axes, and 36 came from §3.30's **β-only**
