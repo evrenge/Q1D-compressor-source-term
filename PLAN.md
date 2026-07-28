@@ -1215,17 +1215,40 @@ identical to the β path at scale 1.0, 0.5 and 0.25.
 
 All four β-path values reproduce §3.24 exactly, so the harness is that section's.
 
-**There is a crossover between 4 and 6 stages**, and the trends differ rather
-than just the levels. The β path is flat in stage count — 1.6, 2.5, 1.7, 0.44,
-1.2 e−06, no direction. The β-free chain **grows monotonically past 4** — 0.18,
-0.70, 0.22, 2.4, 3.2 e−06. So §3.24's headline property, that per-stage errors do
-not accumulate, is a property of *that* closure and does not transfer. Below five
-stages β-free is 3–8× tighter; above, it is 2.6–5× worse.
+**That table is `densify` 9, and the trend it appears to show is not real.** The
+repo's tests all run `densify` 9 for speed while the sweeps run 36; §3.24's
+staging results inherited it and so did these. §3.42 measures β = 9 as a
+**~2.9e−06** interpolation floor against β = 36's 4.4e−08 — the same order as
+every number in the column. Re-run at `densify` 36:
 
-**What that means for how many nodes can be stacked.** Inside the 1e−06 gate:
-**four stages, OPR 24**, on the β-free closure. It keeps converging well past
-that — eight stages at OPR 585 — but at 2–3e−06. The β path holds the gate at six
-and sits just outside at eight.
+| stages | OPR | β path | β-free |
+| --- | --- | --- | --- |
+| 1 | 2.218 | −1.636e−06 | −1.267e−06 |
+| 2 | 4.918 | −2.427e−06 | −1.984e−06 |
+| 4 | 24.188 | −1.656e−06 | −1.172e−06 |
+| 6 | 118.959 | +4.630e−07 | **+9.441e−07** |
+| 8 | 585.053 | +1.208e−06 | **+1.694e−06** |
+
+**The β-free chain does not accumulate.** At `densify` 9 its last three rows read
+0.22 → 2.4 → 3.2 e−06 and looked monotone; at 36 they read 1.17 → 0.94 → 1.69
+e−06, scatter around ~1.5e−06 with no direction. §3.24's property — per-stage
+errors do not accumulate — holds for **both** closures. The claim that it was
+specific to the β path, and the mechanism offered for it (neighbouring stages
+perturbing each other's measured station), were an explanation for an artefact.
+
+Two further things the re-run shows. **The β path is insensitive to map
+resolution here** — 1.648 → 1.636, 2.454 → 2.427, 1.697 → 1.656, 0.4415 → 0.4630
+e−06 across a 4× refinement — so its error is dominated by the closure rather
+than the table, which is consistent with it carrying an internal β state a better
+table cannot help. And **β-free is not uniformly better**: at `densify` 9 it
+looked 3–8× tighter, at 36 the two are within ~25% of each other with β-free
+ahead. The apparent advantage was mostly the coarse map flattering it.
+
+**What that means for how many nodes can be stacked.** At `densify` 36 both
+closures sit at 1–2e−06 across the whole range, with the 6-stage cells inside the
+gate and the rest just outside it. Since the error does not grow with stage
+count, there is no stage limit visible in this data — the binding constraint is
+elsewhere.
 
 **And the numerical limit is not the binding one.** At eight stages the exit
 stagnation temperature is **2072 K**, past turbine-entry conditions, and the
@@ -1234,11 +1257,12 @@ what makes OPR compound geometrically to 2.2177⁸ = 585 — describes no machin
 anybody builds. The arithmetic stays self-consistent long after the model stops
 meaning anything.
 
-**Why β-free accumulates and β does not is not yet measured.** The plausible
-mechanism is that the β-free disk keys on a *measured* downstream station, so
-each stage reads a field the stages behind it are still perturbing, while the β
-path carries an internal state that is insulated from that. Plausible is not
-measured, and it should not be written down as though it were.
+**The lesson is the floor, again.** Every staged number in this project — §3.21,
+§3.24, and the first version of this section — was computed on a `densify` 9 map
+whose own interpolation floor is the same size as the results. §3.42 established
+that floor an hour before this section was written and it was not applied here.
+A measurement should be read against the resolution it was taken at, and the
+repo's tests and its sweeps do not run at the same one.
 
 ### 3.42 The two densification axes are not the same quantity
 
