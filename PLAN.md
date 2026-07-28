@@ -1189,6 +1189,61 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.44 The forty failures, and what is left after they are sorted
+
+The library sweep of §3.41 leaves 40 failures in 1428 cells. Measuring
+`dPR/dECMF` at each one's own design point sorts them, and the sort is not even:
+
+**Twenty-eight are the surge branch** — `TwoStgRadialCompr` 20, `HPA01` 8, every
+one with slope ≥ 0 or indistinguishable from it. Within that group there is a
+gradation worth seeing, because it is one mechanism rather than two:
+
+| slope at the design point | outcome |
+| --- | --- |
+| clearly positive (+0.4 to +6.6) | **dies** |
+| ~0.00 to two decimals | **converges to a wrong value**, error growing with PR — −6.7e−05 at PR 7.8, −5.9e−04 at 9.2, −8.3e−03 at 12.0, −6.2e−02 at 17.5 |
+
+Flat is the neutral case. §3.34 called these two mechanisms; they are the same
+one at different strengths, and the error the flat cells converge to is the
+measure of how little restoring force is left.
+
+**Five are not operating points at all.** `LPC01` and `LPC02` at Nc 0.300,
+f = 0.85 and 1.00, have **PR 0.957 to 0.994** — below one, with η of 9.4 and
+17.4 — a compressor that is not compressing, and workbook filler rather than
+data. `HighPqPTurbine` at Nc 0.000, f = 0.00 has PR 0.999: zero speed, no
+expansion, no duct to build. Counting these as failures flatters nothing and
+measures nothing; the honest denominator is **1423**.
+
+**Seven are the map's own interpolation floor, and `densify` 72 clears them.**
+Free at runtime since §3.37 made the lookup flat in grid size — 25 µs either way
+— so there is no reason not to:
+
+| map | Nc | f | `densify` 36 | `densify` 72 |
+| --- | --- | --- | --- | --- |
+| `TwoStgRadialCompr` | 0.600 | 0.65 | +1.25e−06 | **+4.51e−07** |
+| `TwoStgRadialCompr` | 0.600 | 0.85 | +2.12e−06 | **+7.17e−07** |
+| `TwoStgRadialCompr` | 0.650 | 0.65 | +1.14e−06 | **+1.59e−07** |
+| `MediumPqPCompr` | 0.950 | 0.85 | +1.01e−06 | **+2.00e−07** |
+| `TwoStgTurbine` | 0.472 | 0.15 | +1.40e−06 | **+2.60e−07** |
+| `TwoStgTurbine` | 0.500 | 0.15 | +1.14e−06 | **+3.06e−07** |
+| `TwoStgTurbine` | 0.518 | 0.15 | +1.80e−06 | **+4.93e−07** |
+
+2.8× to 7.2×, and three of them reproduce §3.36's 18/36/72 series digit for
+digit. `MediumPqPCompr` reaches 98/98.
+
+**The eighth candidate did not move, and that is the useful part.**
+`TwoStgRadialCompr` Nc 0.750 f = 0.00 reads −1.37e−06 at both densifications.
+It had been grouped with the resolution cells *because its error was the same
+size as theirs* — while the slope column beside it read +0.00 with the line's PR
+peak at f = 0.142. It is the flat-characteristic case at the low-PR end of the
+same series as its neighbours, and densification cannot supply a restoring force
+that the map does not have. A paired test at two resolutions caught a
+misattribution that the error magnitude alone had hidden.
+
+**So: 1395/1423, 28 correct refusals, nothing recoverable left.** Every remaining
+failure is the model declining to hold a machine on a flat or positively sloped
+characteristic.
+
 ### 3.43 Staged chains leave the β path, and the error trend changes with them
 
 §3.21 and §3.24's staging results — six stages, OPR 119, "the error does not grow
