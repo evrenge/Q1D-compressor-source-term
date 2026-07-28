@@ -1189,58 +1189,79 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
-### 3.42 The densification grid should not be square
+### 3.42 The two densification axes are not the same quantity
 
-`densify` took one factor and applied it to both axes, and 36 came from §3.30's
-**β-only** series. Nobody had measured what the Nc axis contributes, because
-until now nothing could refine them separately.
+`densify` took one factor for both axes, and 36 came from §3.30's **β-only**
+series. `nc_factor` now refines them separately, which makes the question
+answerable.
 
-**On a tabulated speed line** — which is every cell of every sweep in this
-document:
+**β is the dominant axis, and 36 is near its minimum.** At Nc = 36:
 
-| β | Nc | MB | `HighPqPCompr` | `RadialTurbine` |
-| --- | --- | --- | --- | --- |
-| 36 | 36 | 5.3 | 4.37e−08 | 1.95e−08 |
-| 36 | 18 | 2.6 | 4.37e−08 | 1.95e−08 |
-| 36 | 9 | 1.3 | 4.37e−08 | 1.95e−08 |
-| 36 | **1** | **0.2** | **4.37e−08** | **1.95e−08** |
-| 18 | 36 | 2.6 | 9.48e−07 | 4.98e−08 |
-| 9 | 36 | 1.3 | 2.94e−06 | 6.04e−07 |
-| 4 | 36 | 0.6 | 1.72e−05 | 2.88e−06 |
-
-**Mid-interval, between two tabulated lines:**
-
-| β | Nc | `HighPqPCompr` | `RadialTurbine` |
+| β | `HighPqPCompr` on-line | mid-interval | `RadialTurbine` on-line |
 | --- | --- | --- | --- |
-| 36 | 36 | 1.97e−07 | 3.20e−08 |
-| 36 | 18 | 1.97e−07 | 3.20e−08 |
-| 36 | 9 | **1.13e−05** | 3.42e−07 |
+| 36 | 4.37e−08 | 1.97e−07 | 1.95e−08 |
+| 18 | 9.48e−07 | 8.18e−07 | 4.98e−08 |
+| 9 | 2.94e−06 | 2.06e−06 | 6.04e−07 |
+| 4 | 1.72e−05 | 1.54e−05 | 2.88e−06 |
+| 1 | 2.98e−04 | 2.86e−04 | 2.72e−05 |
 
-**β is the axis that matters and 36 is near its minimum.** Halving it costs 22×,
-quartering 67×. That is not headroom.
+Smooth, monotone, roughly second order, and the same on and off the tabulated
+lines. Halving β costs 22×. That is not headroom.
 
-**Nc contributes nothing on a tabulated line** — 36 → 1 is identical to three
-digits at 1/26 the memory. Structural, not incidental: Nc refinement exists only
-to make the runtime's *linear* blend approximate PCHIP, and a point sitting on a
-stored line never blends.
+**The Nc axis needed three attempts to measure, and the failures are the
+lesson.** Sampling operating points taken from the *raw* speed list said Nc was
+worthless — 36 → 1 identical at 1/26 the memory. True, and useless: a point on a
+stored line never blends across speeds, so the axis is inert by construction
+there. Sampling the exact *midpoint* between lines then said Nc = 18 was free.
+Also wrong: an even `nc_factor` puts the midpoint precisely on a refined node.
+Sampling 0.27/0.5/0.73 across the interval, β = 36:
 
-**But it cannot be dropped**, because off-line there is a threshold between 18
-and 9: at 18 the answer is unchanged, at 9 the compressor degrades **57×** and
-leaves the gate. A map refined for on-design cells would fail the moment the
-machine ran between speed lines.
+| Nc | MB | `HighPqPCompr` worst | `RadialTurbine` worst | midpoint reading |
+| --- | --- | --- | --- | --- |
+| 36 | 5.3 | 7.73e−07 | 3.05e−07 | 1.29e−07 |
+| 18 | 2.6 | 1.64e−06 | 8.20e−07 | 1.29e−07 |
+| 12 | 1.8 | 5.44e−06 | 1.56e−06 | 1.29e−07 |
+| 6 | 0.9 | 2.70e−05 | 1.47e−05 | 1.29e−07 |
+| 2 | 0.3 | 2.51e−04 | 1.54e−04 | **1.29e−07** |
+| 1 | 0.2 | 9.84e−04 | 2.92e−04 | 9.84e−04 |
 
-**So β = 36, Nc = 18** — identical error on-line *and* mid-interval, at half the
-memory of the square grid. Free, and nothing in the sweeps changes.
+**The midpoint column reads 1.29e−07 all the way down to Nc = 2, where the true
+worst is 2.51e−04 — a factor of 1,900.** It only breaks at Nc = 1, where no
+intermediate nodes exist for it to land on. A probe aligned with the grid it is
+measuring reports the one position where the interpolation is exact by
+construction.
 
-**The methodological note, which is the same one again.** The first run of this
-experiment sampled operating points taken from the *raw* speed list — that is,
-sitting exactly on tabulated lines — and concluded the Nc axis was worthless. It
-was measuring a case in which the axis is inert by construction. The mid-interval
-re-run is what found the 57× cliff. §3.30's `exit_offset`, §3.36's equivalence
-test, §3.37's β labels, §3.40's monotonicity claim, and now this: five times a
-measurement has been unable to see the thing it was selecting. The check on a new
-measurement should be "in what regime would this number be different, and am I
-sampling it?"
+Three sample positions still under-resolve: `RadialTurbine` reads 1.47e−05 at
+Nc = 6 and 1.47e−06 at Nc = 4, because where the worst case sits moves with the
+grid. **The `worst` column is a lower bound on the worst, not the worst**, and no
+specific Nc threshold should be quoted from it.
+
+**And the two axes are not measuring the same kind of error.** Numerically they
+are identical — PCHIP on both at densify, linear on both at runtime. Physically
+they are not:
+
+| | β | Nc |
+| --- | --- | --- |
+| between the nodes lies | the same measured speed line, resampled | speed lines **never measured** |
+| refinement converges to | the vendor's data | a *model* of variation with speed |
+| assumption carried | none — β is a label, the curve is invariant to it | PCHIP across Nc, **at fixed β** |
+
+β is a construct, and that is exactly why refining along it is safe: it
+parameterises a curve that was measured, and the curve does not depend on the
+parameterisation. Nc lines are physical, and that is exactly why refining
+*between* them is not safe in the same sense — it invents states, and the
+correspondence it invents them along is fixed β, which is the construct doing
+load-bearing work.
+
+**The consequence is the one worth keeping.** This project's own
+leave-one-speed-line-out figures put the cross-speed model error at **1.79%
+(compressors) and 2.71% (turbines)**. The convergence gate is 1e−06 — *0.0001%*.
+So off the tabulated lines the map is four orders of magnitude less certain than
+the number being converged to, and a mid-interval "error" of 7.7e−07 means the
+solver reproduces the *interpolated* map that well, not that the answer is right
+that well. At a tabulated speed the two coincide, because there the map is data.
+Between them they do not. Refining Nc buys self-consistency and repeatability; it
+does not buy fidelity, and no amount of it will.
 
 ### 3.41 The whole library, measured: 1388/1428 across all nineteen maps
 
