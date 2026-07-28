@@ -100,7 +100,7 @@ class BetaMap:
 
     # -- refinement ---------------------------------------------------------
 
-    def densify(self, factor: int = 9) -> BetaMap:
+    def densify(self, factor: int = 9, nc_factor: int | None = None) -> BetaMap:
         """Monotone-cubic refinement of the ``(β, Nc)`` grid, ``factor``× each way.
 
         Refining **before** the ECMF conversion is what makes this worth doing.
@@ -134,21 +134,33 @@ class BetaMap:
         """
         from scipy.interpolate import PchipInterpolator
 
-        if factor < 1:
-            raise ValueError(f"densify factor must be >= 1, got {factor}")
-        if factor == 1:
+        # The two axes answer different questions, so they can be refined
+        # separately. β resolution sets the within-line interpolation floor
+        # (§3.30: 5.5e−06 / 1.6e−06 / 2.7e−07 at 9 / 18 / 36). Nc resolution
+        # sets the cross-speed blending error, which exists because an
+        # ECMF-keyed map must evaluate each bracketing line at the key and blend
+        # — 2.81% against the β path's 1.79% at native spacing. Refining one
+        # does nothing for the other, and `nc_factor` lets that be measured
+        # rather than assumed. Defaults to `factor`, so the single-argument call
+        # is unchanged.
+        nc_factor = factor if nc_factor is None else nc_factor
+        if factor < 1 or nc_factor < 1:
+            raise ValueError(
+                f"densify factors must be >= 1, got beta={factor}, Nc={nc_factor}"
+            )
+        if factor == 1 and nc_factor == 1:
             return self
 
-        def refine(axis: np.ndarray) -> np.ndarray:
-            if len(axis) < 2:
+        def refine(axis: np.ndarray, k: int) -> np.ndarray:
+            if len(axis) < 2 or k == 1:
                 return axis
             return np.concatenate(
-                [np.linspace(axis[i], axis[i + 1], factor + 1)[:-1] for i in range(len(axis) - 1)]
+                [np.linspace(axis[i], axis[i + 1], k + 1)[:-1] for i in range(len(axis) - 1)]
                 + [axis[-1:]]
             )
 
-        beta = refine(self.beta)
-        speed = refine(self.corrected_speed)
+        beta = refine(self.beta, factor)
+        speed = refine(self.corrected_speed, nc_factor)
 
         def stretch(a: np.ndarray) -> np.ndarray:
             # β first (within each supplied speed line), then Nc at fixed β.
@@ -182,7 +194,7 @@ class BetaMap:
             ecmf = Wc * np.sqrt(tau) / PR
 
         return BetaMap(
-            name=f"{self.name}×{factor}",
+            name=f"{self.name}×{factor}" + (f"/{nc_factor}" if nc_factor != factor else ""),
             beta=beta,
             corrected_speed=speed,
             Wc=Wc,

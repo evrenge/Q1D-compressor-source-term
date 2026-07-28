@@ -168,8 +168,40 @@ def test_densify_derives_ecmf_rather_than_interpolating_it(real_map):
 def test_densify_is_identity_at_factor_one_and_rejects_zero():
     m = _synthetic()
     assert m.densify(1) is m
-    with pytest.raises(ValueError, match="factor must be >= 1"):
+    assert m.densify(1, nc_factor=1) is m
+    with pytest.raises(ValueError, match="factors must be >= 1"):
         m.densify(0)
+    with pytest.raises(ValueError, match="factors must be >= 1"):
+        m.densify(9, nc_factor=0)
+
+
+def test_densify_refines_the_two_axes_independently():
+    """β and Nc answer different questions, so they get separate factors.
+
+    β resolution sets the within-line interpolation floor; Nc resolution sets
+    the cross-speed blending error. Refining one does nothing for the other, so
+    a single factor for both is a choice rather than a necessity — and one worth
+    being able to measure.
+    """
+    m = _synthetic(nb=5, ns=4)
+    nb, ns = len(m.beta), len(m.corrected_speed)
+    d = m.densify(6, nc_factor=2)
+    assert len(d.beta) == (nb - 1) * 6 + 1
+    assert len(d.corrected_speed) == (ns - 1) * 2 + 1
+    assert d.PR.shape == (len(d.beta), len(d.corrected_speed))
+
+    # One axis only, on each side.
+    b_only = m.densify(6, nc_factor=1)
+    assert len(b_only.beta) == (nb - 1) * 6 + 1
+    assert np.array_equal(b_only.corrected_speed, m.corrected_speed)
+    n_only = m.densify(1, nc_factor=6)
+    assert np.array_equal(n_only.beta, m.beta)
+    assert len(n_only.corrected_speed) == (ns - 1) * 6 + 1
+
+    # The default is still square, so every existing call is unchanged.
+    sq = m.densify(6)
+    assert len(sq.beta) == (nb - 1) * 6 + 1
+    assert len(sq.corrected_speed) == (ns - 1) * 6 + 1
 
 
 def test_densify_reproduces_pchip_across_speed():
