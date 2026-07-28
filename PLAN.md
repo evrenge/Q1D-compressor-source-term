@@ -1189,6 +1189,59 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.42 The densification grid should not be square
+
+`densify` took one factor and applied it to both axes, and 36 came from §3.30's
+**β-only** series. Nobody had measured what the Nc axis contributes, because
+until now nothing could refine them separately.
+
+**On a tabulated speed line** — which is every cell of every sweep in this
+document:
+
+| β | Nc | MB | `HighPqPCompr` | `RadialTurbine` |
+| --- | --- | --- | --- | --- |
+| 36 | 36 | 5.3 | 4.37e−08 | 1.95e−08 |
+| 36 | 18 | 2.6 | 4.37e−08 | 1.95e−08 |
+| 36 | 9 | 1.3 | 4.37e−08 | 1.95e−08 |
+| 36 | **1** | **0.2** | **4.37e−08** | **1.95e−08** |
+| 18 | 36 | 2.6 | 9.48e−07 | 4.98e−08 |
+| 9 | 36 | 1.3 | 2.94e−06 | 6.04e−07 |
+| 4 | 36 | 0.6 | 1.72e−05 | 2.88e−06 |
+
+**Mid-interval, between two tabulated lines:**
+
+| β | Nc | `HighPqPCompr` | `RadialTurbine` |
+| --- | --- | --- | --- |
+| 36 | 36 | 1.97e−07 | 3.20e−08 |
+| 36 | 18 | 1.97e−07 | 3.20e−08 |
+| 36 | 9 | **1.13e−05** | 3.42e−07 |
+
+**β is the axis that matters and 36 is near its minimum.** Halving it costs 22×,
+quartering 67×. That is not headroom.
+
+**Nc contributes nothing on a tabulated line** — 36 → 1 is identical to three
+digits at 1/26 the memory. Structural, not incidental: Nc refinement exists only
+to make the runtime's *linear* blend approximate PCHIP, and a point sitting on a
+stored line never blends.
+
+**But it cannot be dropped**, because off-line there is a threshold between 18
+and 9: at 18 the answer is unchanged, at 9 the compressor degrades **57×** and
+leaves the gate. A map refined for on-design cells would fail the moment the
+machine ran between speed lines.
+
+**So β = 36, Nc = 18** — identical error on-line *and* mid-interval, at half the
+memory of the square grid. Free, and nothing in the sweeps changes.
+
+**The methodological note, which is the same one again.** The first run of this
+experiment sampled operating points taken from the *raw* speed list — that is,
+sitting exactly on tabulated lines — and concluded the Nc axis was worthless. It
+was measuring a case in which the axis is inert by construction. The mid-interval
+re-run is what found the 57× cliff. §3.30's `exit_offset`, §3.36's equivalence
+test, §3.37's β labels, §3.40's monotonicity claim, and now this: five times a
+measurement has been unable to see the thing it was selecting. The check on a new
+measurement should be "in what regime would this number be different, and am I
+sampling it?"
+
 ### 3.41 The whole library, measured: 1388/1428 across all nineteen maps
 
 Every figure before this section — 261/315, 272/315, **292/315** — is four maps.
