@@ -324,6 +324,9 @@ def static_from_stagnation(
     if p0 <= 0.0 or T0 <= 0.0:
         raise ValueError(f"stagnation state must be positive, got p0={p0!r}, T0={T0!r}")
 
+    if not _is_calorically_perfect(gas):
+        return _static_from_stagnation_real(T0, p0, W, A, gas, supersonic)
+
     phi = W * math.sqrt(gas.R * T0) / (A * p0)
     M = mach_from_flow_function(phi, gas, supersonic=supersonic)
 
@@ -332,6 +335,102 @@ def static_from_stagnation(
     rho = p / (gas.R * T)
     c = gas.speed_of_sound(T)
     return StaticState(p=p, T=T, rho=rho, u=M * c, M=M, c=c)
+
+
+def _is_calorically_perfect(gas) -> bool:
+    """Does this gas have a constant ``gamma``?
+
+    Asked by attribute rather than by type so that any future constant-property
+    gas takes the closed-form path automatically, and any variable one takes the
+    iterative path automatically. :class:`~q1d.gas.Nasa9Gas` raises on ``gamma``
+    precisely so that this question has an answer.
+    """
+    return hasattr(gas, "gamma")
+
+
+def _sonic_temperature(T0: float, gas, lo: float = 1.0) -> float:
+    """The static temperature at which ``u`` reaches ``a``, for a real gas.
+
+    ``u² = 2(h(T₀) − h(T))`` rises as ``T`` falls while ``a² = γ(T)RT`` falls, so
+    ``u² − a²`` is monotone increasing as ``T`` decreases and the crossing is
+    unique. That crossing is the throat: mass flux is maximised there, and it
+    separates the subsonic branch (``T`` above it) from the supersonic one.
+    """
+    h0 = gas.enthalpy(T0)
+
+    def gap(T: float) -> float:
+        return 2.0 * (h0 - gas.enthalpy(T)) - gas.gamma_at(T) * gas.R * T
+
+    hi = T0
+    if gap(hi) > 0.0:
+        return hi
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if gap(mid) > 0.0:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-12 * T0:
+            break
+    return 0.5 * (lo + hi)
+
+
+def _static_from_stagnation_real(
+    T0: float, p0: float, W: float, A: float, gas, supersonic: bool
+) -> StaticState:
+    """The same inversion without a constant ``gamma``.
+
+    Two relations replace the power laws. Energy is ``h(T₀) = h(T) + u²/2``,
+    which is the definition of stagnation enthalpy and needs no ``cp``. The
+    isentrope is ``p/p₀ = exp((s°(T) − s°(T₀))/R)``, which is the general
+    statement the constant-``γ`` power law approximates. Solving
+
+        ρ(T)·u(T)·A = W
+
+    for ``T`` is then one bracketed root-find, and the bracket is set by the
+    sonic point because mass flux is maximised there.
+    """
+    h0 = gas.enthalpy(T0)
+
+    def mass_flux(T: float) -> float:
+        dh = h0 - gas.enthalpy(T)
+        if dh <= 0.0:
+            return 0.0
+        u = math.sqrt(2.0 * dh)
+        p = p0 * math.exp((gas.entropy_ref(T) - gas.entropy_ref(T0)) / gas.R)
+        return p / (gas.R * T) * u * A
+
+    T_star = _sonic_temperature(T0, gas)
+    w_max = mass_flux(T_star)
+    if W > w_max * (1.0 + 1e-12):
+        raise InletChokeLimited(
+            f"mass flow {W:.6g} kg/s exceeds the choked maximum {w_max:.6g} kg/s for "
+            f"T0={T0:.6g} K, p0={p0:.6g} Pa, A={A:.6g} m^2 on {getattr(gas, 'name', gas)}"
+        )
+
+    if supersonic:
+        lo, hi = 1e-3 * T0, T_star
+    else:
+        lo, hi = T_star, T0 * (1.0 - 1e-15)
+
+    # mass_flux rises toward T_star from both sides, so it FALLS with T on the
+    # subsonic branch and RISES with T on the supersonic one. `lo` is held as
+    # the sonic side in both cases, which is what makes the update uniform.
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if (mass_flux(mid) > W) != supersonic:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-13 * T0:
+            break
+    T = 0.5 * (lo + hi)
+
+    p = p0 * math.exp((gas.entropy_ref(T) - gas.entropy_ref(T0)) / gas.R)
+    rho = p / (gas.R * T)
+    u = math.sqrt(max(2.0 * (h0 - gas.enthalpy(T)), 0.0))
+    c = gas.speed_of_sound(T)
+    return StaticState(p=p, T=T, rho=rho, u=u, M=u / c, c=c)
 
 
 def state_from_flux(
@@ -362,6 +461,9 @@ def state_from_flux(
     if m <= 0.0:
         raise ValueError(f"mass flux must be positive, got {m!r}")
 
+    if not _is_calorically_perfect(gas):
+        return _state_from_flux_real(m, P, E, gas, supersonic)
+
     a = gas.g_over_gm1  # cp/R
     qa, qb, qc = m * (0.5 - a), a * P, -E
     disc = qb * qb - 4.0 * qa * qc
@@ -389,6 +491,70 @@ def state_from_flux(
         )
     found.sort(key=lambda s: s.M)
     return found[-1] if supersonic else found[0]
+
+
+def _state_from_flux_real(m: float, P: float, E: float, gas, supersonic: bool):
+    """The same inversion when ``cp`` is not constant.
+
+    The quadratic above exists only because ``cp/R`` is a number. Without that,
+    eliminating ``ρ`` and ``p`` from the three fluxes leaves one equation in
+    ``u``::
+
+        h(T(u)) + u²/2 = E/m,     T(u) = (P − m·u)·u / (m·R)
+
+    ``T(u)`` is a downward parabola vanishing at ``u = 0`` and ``u = P/m``, so
+    the physical window is that interval and the sonic point inside it splits
+    the subsonic root from the supersonic one — the same two states passing the
+    same flux that the quadratic's two roots represent.
+    """
+    u_max = P / m
+    H = E / m
+
+    def T_of(u: float) -> float:
+        return (P - m * u) * u / (m * gas.R)
+
+    def gap(u: float) -> float:
+        T = T_of(u)
+        if T <= 0.0:
+            return math.inf
+        return gas.enthalpy(T) + 0.5 * u * u - H
+
+    # Sonic point: u = a(T(u)). u rises, a falls once past the parabola's peak,
+    # so the crossing is unique on (0, u_max).
+    lo, hi = 1e-9 * u_max, u_max * (1.0 - 1e-12)
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        T = T_of(mid)
+        if T <= 0.0 or mid > gas.speed_of_sound(T):
+            hi = mid
+        else:
+            lo = mid
+        if hi - lo < 1e-14 * u_max:
+            break
+    u_star = 0.5 * (lo + hi)
+
+    lo, hi = (1e-9 * u_max, u_star) if not supersonic else (u_star, u_max * (1.0 - 1e-12))
+    g_lo, g_hi = gap(lo), gap(hi)
+    if not (math.isfinite(g_lo) and math.isfinite(g_hi)) or g_lo * g_hi > 0.0:
+        raise InfeasibleOperatingPoint(
+            f"no {'supersonic' if supersonic else 'subsonic'} state produces this flux: "
+            f"m={m:.6g}, P={P:.6g}, E={E:.6g} on {getattr(gas, 'name', gas)}"
+        )
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if gap(mid) * g_lo > 0.0:
+            lo, g_lo = mid, gap(mid)
+        else:
+            hi = mid
+        if hi - lo < 1e-14 * u_max:
+            break
+    u = 0.5 * (lo + hi)
+
+    p = P - m * u
+    rho = m / u
+    T = p / (rho * gas.R)
+    c = gas.speed_of_sound(T)
+    return StaticState(p=p, T=T, rho=rho, u=u, M=u / c, c=c)
 
 
 def choked_mass_flow(p0: float, T0: float, A: float, gas: PerfectGas) -> float:
