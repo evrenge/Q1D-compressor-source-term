@@ -1189,6 +1189,74 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.41 The whole library, measured: 1388/1428 across all nineteen maps
+
+Every figure before this section — 261/315, 272/315, **292/315** — is four maps.
+`SubsonicCompressor`, `TranssonicCompressor`, `HighPqPCompr`, `TwoStgRadialCompr`.
+They were repeatedly described in this document and in conversation as "the
+library". There are **nineteen** supplied maps and the library is 1428 cells.
+
+**Compressors and fans, 944/980:**
+
+| map | | map | |
+| --- | --- | --- | --- |
+| `HPC02` | 49/49 | `LowBPRFan` | 91/91 |
+| `HighPqPCompr` | 70/70 | `LowPqPCompr` | 77/77 |
+| `IPC01` | 63/63 | `SingleStgRadialCompr` | 77/77 |
+| `SubsonicCompressor` | 84/84 | `TranssonicCompressor` | 63/63 |
+| `MediumPqPCompr` | 97/98 | `LPC01` | 68/70 |
+| `LPC02` | 68/70 | `HPA01` | 62/70 |
+| `TwoStgRadialCompr` | 75/98 | | |
+
+**Turbines, 444/448** (§3.40's closure, `densify` 36, inlet Mach derived per cell
+from the exit-choke constraint):
+
+| map | | map | |
+| --- | --- | --- | --- |
+| `SingleStgTurbine` | 35/35 | `Ipt01` | 49/49 |
+| `RadialTurbine` | 49/49 | `MediumPqPTurbine` | 70/70 |
+| `HighPqPTurbine` | 104/105 | `TwoStgTurbine` | 137/140 |
+
+**Nine of these maps had never been swept**, and they were not easy ones:
+`MediumPqPCompr` holds 97/98 with its top three speed lines uninvertible;
+`LowBPRFan` 91/91 with 28/28 on refused lines. That is §3.30's ECMF keying
+generalising to data it was not developed against, rather than fitting the four
+maps it was built on.
+
+**The four originals reproduce exactly on this HEAD** — 84/84, 63/63, 70/70,
+75/98, digit for digit against sweeps run five commits earlier, alongside
+bit-identical `evaluate` over 1,665 lookups including both off-table branches and
+505 design points. So the turbine work cost the compressors nothing, and that is
+measured rather than argued.
+
+**`HPA01` is the one compressor map with real deaths, and they are surge.**
+Eight cells, spanning PR 2.5 to 7.5 — while PR **11.500** holds on the same
+column. Not a pressure ceiling. Measuring `dPR/dECMF` at all 70 design points:
+
+| | count |
+| --- | --- |
+| slope ≥ 0 and died | 7 |
+| slope < 0 and held | 62 |
+| slope ≥ 0 but held | **0** |
+| slope < 0 but died | 1 |
+
+**69 of 70 classified by slope sign alone.** The lines whose PR peak sits *at*
+`f` = 0.000 — Nc 0.500, 0.950, 1.000, 1.050 — hold every cell; the lines whose
+peak is interior lose exactly their `f` = 0.0 cell. The single exception has
+slope −0.1 against its neighbours' −0.6: falling, but too flat to restore, which
+is §3.34 unchanged. `HPA01` is tabulated past its own surge line on six of ten
+speed lines, arrived at independently of `TwoStgRadialCompr`.
+
+**So the 40 failures are three known things and nothing else:** the surge branch
+(`HPA01` 7, `TwoStgRadialCompr` ~20), the off-table/degenerate ends, and three
+turbine cells sitting exactly on the 1e−06 gate at the `densify` 36 floor.
+**Zero unexplained deaths in 1428 cells.**
+
+**The correction worth keeping.** "The library" meant four maps for most of this
+document's life, and the number was quoted as though it meant nineteen. A
+coverage claim needs its denominator stated every time, because the denominator
+is the part that silently shrinks.
+
 ### 3.40 One key for both machines — and the reason there were two was a bug
 
 §3.39 ran turbines on `FlowMatchedCompressor` with a `beta_map` and an explicit
