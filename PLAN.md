@@ -1189,6 +1189,73 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.40 One key for both machines — and the reason there were two was a bug
+
+§3.39 ran turbines on `FlowMatchedCompressor` with a `beta_map` and an explicit
+`beta0` seed: the legacy β-driven closure. So it validated the turbine *physics*
+on the path the compressors had already left. Wiring turbines into the β-free
+disk exposed something worse than a missing feature.
+
+**The inherited claim.** `ECMFMap`'s own docstring, predating this work, said
+ECMF was monotonic on 7 of 22 turbine speed lines against `PR`'s 22 of 22, and
+concluded *"a turbine wants its own key"*. §3.38 built a PR-keyed table on that.
+
+**It was measured with the bug §3.38 fixed.** Every turbine τ was a temperature
+*rise* instead of a drop and the ECMF factor was inverted. Recomputed over all
+six turbine maps:
+
+| ECMF monotonic in β | lines |
+| --- | --- |
+| with §3.38's broken thermodynamics | **17 / 64** |
+| with the correct thermodynamics | **64 / 64** |
+
+**And PR is the one key a turbine disk must not use.** The disk *asserts* a
+pressure ratio, so `p₀₂ = p₀₁/PR_measured` is an identity: the source reproduces
+the ratio it just read from its own station, and nothing anchors it. Measured on
+the PR key, every map converged to a small one-signed residual and stayed there —
+
+| | PR key | ECMF key, `densify` 36 |
+| --- | --- | --- |
+| `Ipt01` | −3.4e−03 | **+7.1e−08** |
+| `RadialTurbine` | −5.6e−03 | **+1.4e−07** |
+| `SingleStgTurbine` | −6.0e−03 | **+2.3e−08** |
+| `HighPqPTurbine` | −2.7e−03 | **+1.1e−07** |
+| `MediumPqPTurbine` | −4.4e−04 | **+3.6e−07** |
+| `TwoStgTurbine` | −1.3e−02 | **+3.1e−07** |
+
+— **11 of 11 buildable cells inside the gate**, including `TwoStgTurbine`, which
+*died* on the β path of §3.39.
+
+The diagnosis took a wrong turn first, and the wrong turn is what identified it.
+Reading the key off the seeded design field showed `exit_offset` 2 carrying a
+**95 ppm** bias where offset 3 was exact — §3.36 had chosen 2 for compressors
+noting "3 is equally good", and for a compressor it is. Fixing it improved
+`Ipt01` fivefold and `RadialTurbine` not at all. A station-reading error would
+have moved both. That insensitivity is what pointed at the identity rather than
+the reading.
+
+**What this deletes.** The PR-keyed table path, the tabulated `Wc` column, and
+the turbine branch in `_exit_ecmf` — which never needed to exist, because that
+method measures `p₀₂/p₀₁` from the *field*, and the two machines differ only in
+which way up they *store* that ratio. `Wc·√τ/pr` was always ECMF for either.
+
+The one real asymmetry left is recovering `Wc` from the key: `ECMF = Wc·√τ/PR`
+for a compressor storing `p₀₂/p₀₁`, and `Wc·√τ·PR` for a turbine storing
+`p₀₁/p₀₂`. Verified reproducing the key to **2.22e−16** on both.
+
+**So the runtime is one closure.** Same disk, same ECMF key measured the same
+way, same momentum and energy sources, no mass source, no β. What differs is
+read from the map: which way up `PR` is stored, and the sign of the work.
+
+**The methodological failure is the point.** §3.38 found the turbine
+thermodynamics wrong and fixed them. It did not re-measure the conclusions that
+had been *derived* from those thermodynamics, and the ECMF-monotonicity number
+was one of them. A fix invalidates every measurement downstream of the bug; that
+has to be treated as work the fix creates, not as prior art it inherits. This is
+the fourth time in this project a number chosen under one regime turned out not
+to survive the next — §3.30's `exit_offset`, §3.36's equivalence test, §3.37's
+β labels, and now this.
+
 ### 3.39 Turbines run: five of six hold at 1e−09, on the compressor's own closure
 
 The maps of §3.38 loaded but nothing downstream accepted them. Two things stood

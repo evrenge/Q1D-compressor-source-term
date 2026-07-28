@@ -451,9 +451,21 @@ class ECMFMap:
     convergent discretisation of the map rather than a bias. Densify accordingly;
     re-keying does not help it and was never going to.
 
-    Turbines are excluded on purpose. ECMF is monotonic on only 7 of 22 turbine
-    speed lines, while ``PR`` is monotonic on **22 of 22** — a turbine wants its
-    own key, and :meth:`BetaMap` still serves it.
+    **Turbines use this too, and the reason they once could not was a bug.** An
+    earlier version of this docstring said ECMF was monotonic on only 7 of 22
+    turbine speed lines against ``PR``'s 22 of 22, and concluded that a turbine
+    wanted its own key. That measurement was taken with turbine maps read as
+    compressors (§3.38): every τ a temperature *rise* instead of a drop, and the
+    ECMF factor upside down. Recomputed with the right thermodynamics, ECMF is
+    monotonic on **64 of 64** turbine speed lines.
+
+    ``PR`` is in fact the one key a turbine disk must not use. The disk *asserts*
+    a pressure ratio, so keying on it makes ``p₀₂ = p₀₁/PR_measured`` an identity
+    — the source reproduces the ratio it just read, with no restoring force. It
+    converges, to 3e−03, and no improvement in the station reading moves it.
+    ECMF carries the mass flow, which the disk does not impose, so the loop
+    closes on something it cannot fake: the same cells land at 1e−07 to 1e−09
+    (§3.40).
     """
 
     name: str
