@@ -1493,7 +1493,7 @@ class EcmfCompressor:
     map densification, and vanishes entirely against an
     :class:`~q1d.maps.ECMFMap`, which reproduces its own key to 2.2e−16.
 
-    **Station placement — ``exit_offset`` 2 or 3, never 1.** ``station_state_at``
+    **Station placement — ``exit_offset`` 3.** ``station_state_at``
     reads a cell's *upstream* face. At ``exit_offset`` 1 that face sits between
     the last forced cell and the first unforced one, and those two states differ
     by one cell's share of the source — at PR 25 with ``n_smear`` 7 a **58%
@@ -1521,8 +1521,15 @@ class EcmfCompressor:
     supersonic and kills the run (``PLAN.md`` §3.35, §3.36).
 
     Do not go past 3: §3.30 measured offsets 4 and 8 as failing to converge,
-    because the transport delay from disk to station enters the t−1 path. Two and
-    three are the usable values and they agree to five digits.
+    because the transport delay from disk to station enters the t−1 path.
+
+    **Why 3 and not 2**, since §3.36 chose 2 saying "3 is equally good". They are
+    equally good for a *compressor*, whose sensitivity to the key hides the
+    difference — the table above shows offset 2 landing on 0.9970–0.9983 rather
+    than 1.0000, a residual of roughly **95 ppm** in the measured key. A turbine
+    amplifies that through its own `dPR/dkey` into 3e−03 in the converged mass
+    flow. Offset 3 is exact for both, so there is no reason for the two machines
+    to differ and they no longer do (`PLAN.md` §3.44).
 
     **Use ``inlet_lag = key_lag = 1e-2``. Smaller is not faster and is not
     safe.** Both filters have unit DC gain, so ``tau`` cannot move the answer —
@@ -1553,7 +1560,7 @@ class EcmfCompressor:
     ecmf_map: object  # ECMFMap; annotated loosely to avoid a circular import
     corrected_speed: float
     sample_offset: int = 2
-    exit_offset: int = 2
+    exit_offset: int = 3
     n_smear: int = 1
     inlet_lag: float = 0.0
     key_lag: float | None = None  # None -> same as inlet_lag
