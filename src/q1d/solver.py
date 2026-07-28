@@ -108,6 +108,55 @@ CFL_STABILITY_LIMIT_ORDER2 = 2.43
 CFL_STABILITY_LIMIT_ORDER1 = 3.12
 
 
+def _has_constant_gamma(gas) -> bool:
+    """Whether the closed-form perfect-gas algebra applies. See analytic.py."""
+    return hasattr(gas, "gamma")
+
+
+def _temperature_from_enthalpy_arr(gas, h, hint=None):
+    """Vectorised inverse of ``h(T)``, warm-started from the last call."""
+    ha = np.asarray(h, dtype=float)
+    T = np.full_like(ha, 300.0)
+    if hint is not None and np.shape(hint) == ha.shape:
+        T = np.array(hint, dtype=float)
+    for _ in range(80):
+        step = (gas.enthalpy(T) - ha) / gas.cp_at(T)
+        T = np.maximum(T - step, 1.0)
+        if np.all(np.abs(step) < 1e-11 * np.maximum(T, 1.0)):
+            break
+    return T
+
+
+def _pressure_real(gas, cv: np.ndarray, a: np.ndarray, hint=None) -> np.ndarray:
+    """``p`` from the conserved variables when ``cp`` is not constant.
+
+    ``e = E/rho - u^2/2`` is internal energy; for any gas ``e = h(T) - R*T``, so
+    ``T`` follows by inverting that and ``p = rho*R*T``. The inversion is a
+    vectorised Newton, warm-started from the previous step's temperature when
+    one is available -- during a converging run that start is within a few
+    kelvin and the Newton takes two or three iterations rather than twenty.
+    """
+    rho = cv[0] / a
+    u = cv[1] / cv[0]
+    e = cv[2] / (rho * a) - 0.5 * u * u
+    T = _temperature_from_internal(gas, e, hint)
+    return rho * gas.R * T
+
+
+def _temperature_from_internal(gas, e: np.ndarray, hint=None) -> np.ndarray:
+    """Solve ``h(T) - R*T = e`` for ``T``. Derivative is ``cp(T) - R = cv(T)``."""
+    T = np.full_like(np.asarray(e, dtype=float), 300.0) if hint is None else np.array(hint, float)
+    if T.shape != np.shape(e):
+        T = np.full_like(np.asarray(e, dtype=float), 300.0)
+    for _ in range(80):
+        f = gas.enthalpy(T) - gas.R * T - e
+        step = f / (gas.cp_at(T) - gas.R)
+        T = np.maximum(T - step, 1.0)
+        if np.all(np.abs(step) < 1e-11 * np.maximum(T, 1.0)):
+            break
+    return T
+
+
 @dataclass(frozen=True)
 class SolverConfig:
     #: Default carries ~20% margin below the measured limit.
@@ -188,6 +237,8 @@ class Solver:
         self._face_flux: np.ndarray | None = None
 
         n = grid.n_interior
+        self._roe_T_hint = None
+        self._T_hint = None
         self.cv = np.zeros((3, n + 2))
         self.p = np.zeros(n + 2)
         self.t = 0.0
@@ -222,7 +273,16 @@ class Solver:
 
         self.cv[0, 1:-1] = rho * a
         self.cv[1, 1:-1] = rho * u * a
-        self.cv[2, 1:-1] = (p / self.gas.gm1 + 0.5 * rho * u * u) * a
+        # Total energy. For a calorically perfect gas the internal energy is
+        # p/(gamma-1); in general it is rho*(h(T) - R*T), which is the same thing
+        # when h = cp*T. Writing it the general way costs one enthalpy call at
+        # setup and lets the same solver carry a NASA9 gas (`PLAN.md` §3.45).
+        if _has_constant_gamma(self.gas):
+            self.cv[2, 1:-1] = (p / self.gas.gm1 + 0.5 * rho * u * u) * a
+        else:
+            T = p / (rho * self.gas.R)
+            self.cv[2, 1:-1] = rho * (self.gas.enthalpy(T) - self.gas.R * T
+                                      + 0.5 * u * u) * a
         # Derive p from cv rather than storing the argument, so the state is
         # exactly what an RK stage would produce. Storing p directly left it
         # 1 ulp inconsistent with cv, which made the well-balancedness gate
@@ -232,24 +292,35 @@ class Solver:
         # whole-array `_update_pressure` would divide by a zero ghost density.
         # `_sync_boundaries` fills them from the interior immediately after.
         cv = self.cv
-        self.p[1:-1] = (
-            self.gas.gm1 / a * (cv[2, 1:-1] - 0.5 * cv[1, 1:-1] * cv[1, 1:-1] / cv[0, 1:-1])
-        )
+        if _has_constant_gamma(self.gas):
+            self.p[1:-1] = (
+                self.gas.gm1 / a * (cv[2, 1:-1] - 0.5 * cv[1, 1:-1] * cv[1, 1:-1] / cv[0, 1:-1])
+            )
+        else:
+            self.p[1:-1] = _pressure_real(
+                self.gas, cv[:, 1:-1], a, getattr(self, "_T_hint", None)
+            )
         self._sync_boundaries()
 
     def primitives(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """``(rho, u, p, c)`` over all cells including ghosts."""
         rho = self.cv[0] / self.grid.a_cell
         u = self.cv[1] / self.cv[0]
-        return rho, u, self.p, np.sqrt(self.gas.gamma * self.p / rho)
+        if _has_constant_gamma(self.gas):
+            return rho, u, self.p, np.sqrt(self.gas.gamma * self.p / rho)
+        T = self.p / (rho * self.gas.R)
+        return rho, u, self.p, np.sqrt(self.gas.gamma_at(T) * self.gas.R * T)
 
     def _update_pressure(self) -> None:
         cv, a = self.cv, self.grid.a_cell
-        np.multiply(
-            self.gas.gm1 / a,
-            cv[2] - 0.5 * cv[1] * cv[1] / cv[0],
-            out=self.p,
-        )
+        if _has_constant_gamma(self.gas):
+            np.multiply(
+                self.gas.gm1 / a,
+                cv[2] - 0.5 * cv[1] * cv[1] / cv[0],
+                out=self.p,
+            )
+        else:
+            self.p[:] = _pressure_real(self.gas, cv, a, getattr(self, "_T_hint", None))
         # min() returns NaN if any element is NaN, so `not (m > 0)` catches
         # non-positive and non-finite in one reduction per array.
         if not (self.p.min() > 0.0 and cv[0].min() > 0.0):
@@ -296,8 +367,15 @@ class Solver:
         gas = self.gas
         rl, ul, pl = left
         rr, ur, pr = right
-        hl = gas.g_over_gm1 * pl / rl + 0.5 * ul * ul
-        hr = gas.g_over_gm1 * pr / rr + 0.5 * ur * ur
+        perfect = _has_constant_gamma(gas)
+        if perfect:
+            hl = gas.g_over_gm1 * pl / rl + 0.5 * ul * ul
+            hr = gas.g_over_gm1 * pr / rr + 0.5 * ur * ur
+        else:
+            # Total enthalpy from the polynomials. `cp/(gamma-1) * p/rho` is
+            # `cp*T`, which is only `h` when `cp` is constant.
+            hl = gas.enthalpy(pl / (rl * gas.R)) + 0.5 * ul * ul
+            hr = gas.enthalpy(pr / (rr * gas.R)) + 0.5 * ur * ur
         qrl, qrr = ul * rl, ur * rr
 
         central = np.array(
@@ -314,7 +392,18 @@ class Solver:
         uav = (ul + dd * ur) * dd1
         hav = (hl + dd * hr) * dd1
         q2a = 0.5 * uav * uav
-        c2a = gas.gm1 * (hav - q2a)
+        if perfect:
+            c2a = gas.gm1 * (hav - q2a)
+        else:
+            # Equivalent-gamma Roe. The eigenstructure is derived assuming a
+            # constant gamma; the standard real-gas treatment keeps it and
+            # evaluates gamma at the Roe-averaged state, which is exact where
+            # the two sides agree and consistent in the limit of small jumps.
+            # `hav - q2a` is the averaged STATIC enthalpy, so it inverts for the
+            # averaged temperature directly.
+            Tav = _temperature_from_enthalpy_arr(gas, hav - q2a, self._roe_T_hint)
+            self._roe_T_hint = Tav
+            c2a = (gas.gamma_at(Tav) - 1.0) * (hav - q2a)
         cav = np.sqrt(c2a)
 
         # One stacked Harten correction rather than three separate calls.

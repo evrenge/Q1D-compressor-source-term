@@ -221,51 +221,88 @@ class Nasa9Gas:
             name=name or f"{mechanism}:{'/'.join(f'{k}={v:.4g}' for k, v in X.items())}",
         )
 
-    @staticmethod
-    def _pick(blocks, T: float):
-        for lo, hi, a, b1, b2 in blocks:
-            if T <= hi:
-                return a, b1, b2
-        return blocks[-1][2], blocks[-1][3], blocks[-1][4]
+    def _coeffs(self, T):
+        """Per-species coefficient rows selected for ``T``, scalar or array.
 
-    def cp_at(self, T: float) -> float:
-        out = 0.0
-        for blocks, w in zip(self.regions, self.weights, strict=True):
-            a, _, _ = self._pick(blocks, T)
-            out += w * (
-                a[0] / T**2 + a[1] / T + a[2] + a[3] * T
-                + a[4] * T**2 + a[5] * T**3 + a[6] * T**4
+        Vectorised because the solver evaluates these on every face of every
+        cell of every step. A scalar Newton per face would make the real gas
+        unusable rather than merely slower: the perfect-gas step already costs
+        1512 µs at 201 cells (``PLAN.md`` §3.41).
+        """
+        import numpy as np
+
+        Ta = np.asarray(T, dtype=float)
+        for blocks in self.regions:
+            edges = np.array([b[1] for b in blocks[:-1]])
+            idx = np.searchsorted(edges, Ta, side="left")
+            table = np.array([[*b[2], b[3], b[4]] for b in blocks])
+            yield table[idx]
+
+    def cp_at(self, T):
+        import numpy as np
+
+        Ta = np.asarray(T, dtype=float)
+        out = np.zeros_like(Ta)
+        for c, w in zip(self._coeffs(Ta), self.weights, strict=True):
+            a = [c[..., i] for i in range(7)]
+            out = out + w * (
+                a[0] / Ta**2 + a[1] / Ta + a[2] + a[3] * Ta
+                + a[4] * Ta**2 + a[5] * Ta**3 + a[6] * Ta**4
             )
-        return out
+        return float(out) if np.ndim(T) == 0 else out
 
-    def enthalpy(self, T: float) -> float:
-        out = 0.0
-        lnT = math.log(T)
-        for blocks, w in zip(self.regions, self.weights, strict=True):
-            a, b1, _ = self._pick(blocks, T)
-            out += w * T * (
-                -a[0] / T**2 + a[1] * lnT / T + a[2] + a[3] * T / 2.0
-                + a[4] * T**2 / 3.0 + a[5] * T**3 / 4.0 + a[6] * T**4 / 5.0 + b1 / T
+    def enthalpy(self, T):
+        import numpy as np
+
+        Ta = np.asarray(T, dtype=float)
+        lnT = np.log(Ta)
+        out = np.zeros_like(Ta)
+        for c, w in zip(self._coeffs(Ta), self.weights, strict=True):
+            a = [c[..., i] for i in range(7)]
+            b1 = c[..., 7]
+            out = out + w * Ta * (
+                -a[0] / Ta**2 + a[1] * lnT / Ta + a[2] + a[3] * Ta / 2.0
+                + a[4] * Ta**2 / 3.0 + a[5] * Ta**3 / 4.0 + a[6] * Ta**4 / 5.0 + b1 / Ta
             )
-        return out
+        return float(out) if np.ndim(T) == 0 else out
 
-    def entropy_ref(self, T: float) -> float:
-        out = 0.0
-        lnT = math.log(T)
-        for blocks, w in zip(self.regions, self.weights, strict=True):
-            a, _, b2 = self._pick(blocks, T)
-            out += w * (
-                -a[0] / (2.0 * T**2) - a[1] / T + a[2] * lnT + a[3] * T
-                + a[4] * T**2 / 2.0 + a[5] * T**3 / 3.0 + a[6] * T**4 / 4.0 + b2
+    def entropy_ref(self, T):
+        import numpy as np
+
+        Ta = np.asarray(T, dtype=float)
+        lnT = np.log(Ta)
+        out = np.zeros_like(Ta)
+        for c, w in zip(self._coeffs(Ta), self.weights, strict=True):
+            a = [c[..., i] for i in range(7)]
+            b2 = c[..., 8]
+            out = out + w * (
+                -a[0] / (2.0 * Ta**2) - a[1] / Ta + a[2] * lnT + a[3] * Ta
+                + a[4] * Ta**2 / 2.0 + a[5] * Ta**3 / 3.0 + a[6] * Ta**4 / 4.0 + b2
             )
-        return out
+        return float(out) if np.ndim(T) == 0 else out
 
-    def gamma_at(self, T: float) -> float:
+    def gamma_at(self, T):
         cp = self.cp_at(T)
         return cp / (cp - self.R)
 
-    def speed_of_sound(self, T: float) -> float:
-        return (self.gamma_at(T) * self.R * T) ** 0.5
+    def speed_of_sound(self, T):
+        import numpy as np
+
+        return np.sqrt(self.gamma_at(T) * self.R * np.asarray(T, dtype=float)) \
+            if np.ndim(T) else (self.gamma_at(T) * self.R * T) ** 0.5
+
+    def temperature_from_enthalpy_array(self, h, guess=None):
+        """Vectorised Newton on ``h(T)``, for the solver's per-cell inversion."""
+        import numpy as np
+
+        ha = np.asarray(h, dtype=float)
+        T = np.full_like(ha, 300.0) if guess is None else np.array(guess, dtype=float)
+        for _ in range(80):
+            step = (self.enthalpy(T) - ha) / self.cp_at(T)
+            T = np.maximum(T - step, 1.0)
+            if np.all(np.abs(step) < 1e-11 * np.maximum(T, 1.0)):
+                break
+        return T
 
     def temperature_from_enthalpy(self, h: float, guess: float = 300.0) -> float:
         """Invert ``h(T)``. Newton on a function whose derivative is ``cp``.
