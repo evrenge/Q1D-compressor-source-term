@@ -1189,6 +1189,77 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.39 Turbines run: five of six hold at 1e−09, on the compressor's own closure
+
+The maps of §3.38 loaded but nothing downstream accepted them. Two things stood
+in the way and neither was deep.
+
+**`p02 = PR·p01`, at six sites.** Both machines tabulate a ratio above 1 and they
+are not the same ratio, so the compressor form on a turbine *raises* the pressure
+while the energy source *lowers* the temperature — a disk that compresses and
+cools at once. Dimensionally fine, physically impossible, and silent. Now
+`_exit_p0(PR, p01, kind)`, with the kind read off a `BetaMap` or inferred from an
+`ECMFMap`'s `key_field`, since only a turbine is keyed on `PR`.
+
+**A hard-coded `not a compressor` guard** in `design_from_map`, refusing negative
+work. The direction of the temperature change is the machine's definition, so it
+is now checked against the machine. The equal-area exit-choke guard becomes
+compressor-only: for a turbine the exit is the *low-pressure* station, so
+`Φ₂ = Φ₁·PR/√τ > Φ₁` and the exit saturates first — the reverse of a compressor,
+where §Phase 1 showed the guard was unreachable.
+
+**Inlet conditions were the substance, not a detail.** At a standard-day inlet
+these maps expand to **169–210 K** and the design refuses them, correctly: the
+map asks for more enthalpy than the flow carries. At **1600 K / 1200 kPa** all
+six build, at 1172–1439 K. `Δh₀ = CW·θ`, so the drop scales with inlet
+temperature and only turbine-entry conditions put the exit anywhere sensible.
+
+| turbine | M₁ | PR | p₀ | T₀ | SWx |
+| --- | --- | --- | --- | --- | --- |
+| `Ipt01` | 0.45 | 1.497 | 1200→802 kPa | 1600→1439 K | −48.0 MW |
+| `MediumPqPTurbine` | 0.35 | 1.920 | 1200→625 kPa | 1600→1353 K | −465.9 MW |
+| `HighPqPTurbine` | 0.25 | 2.516 | 1200→477 kPa | 1600→1303 K | −3.5 MW |
+| `RadialTurbine` | 0.25 | 2.524 | 1200→475 kPa | 1600→1301 K | −4.4 MW |
+| `SingleStgTurbine` | 0.25 | 2.719 | 1200→441 kPa | 1600→1238 K | −5.7 MW |
+| `TwoStgTurbine` | 0.15 | 3.578 | 1200→335 kPa | 1600→1172 K | −39.4 MW |
+
+The inlet Mach a turbine tolerates falls with its expansion ratio, which is
+`Φ₂ = Φ₁·PR/√τ` read backwards.
+
+**Marched to steady state, seeded from the design field:**
+
+| turbine | f = 0.15 | f = 0.5 |
+| --- | --- | --- |
+| `Ipt01` | −2.4e−09 | −1.6e−09 |
+| `RadialTurbine` | −5.1e−10 | −3.0e−10 |
+| `SingleStgTurbine` | −6.2e−10 | −1.5e−09 |
+| `HighPqPTurbine` | −5.3e−10 | −2.8e−10 |
+| `MediumPqPTurbine` | −1.0e−09 | −7.0e−10 |
+| `TwoStgTurbine` | died 16200 | died 4658 |
+
+**The closure needed no change at all.** The disk is a momentum source `Fx` on
+`q[1]` and an energy source `SWx` on `q[2]`, with no mass source, and that form
+is machine-agnostic: it is Δ(pressure force) + Δ(momentum flux), and `W·Δh₀`.
+Once `corrected_work` carries the right sign the whole thing runs backwards on
+its own. Everything that had to change was a *convention* — which ratio `PR`
+names, which direction temperature moves — and none of it was physics.
+
+**`TwoStgTurbine` fails with `mass flux must be positive`** — flow reversal, at
+the largest expansion ratio and therefore the lowest inlet Mach the duct will
+take. Lowering M₁ further makes it worse (dies at 2336 rather than 16200), so it
+is not a sizing knob: a strong source in a slow duct reverses it, which is the
+turbine-side counterpart of §3.34's surge branch rather than a defect in the
+closure. `f = 0.85` is a build refusal on every map, the exit-choke limit at the
+high-expansion end of each speed line.
+
+**Compressors verified unchanged throughout**: 427 design points across all
+eleven maps comparing `p02`, `T02`, `Fx`, `SWx`, `area` and `p_back` against
+§3.37's `964d177` — **0.000e+00**.
+
+**Open.** A turbine sweep at the scale the compressors got (every speed line ×
+seven positions), per-position inlet Mach so the choke-limited column can be
+reached at all, and the `TwoStgTurbine` reversal.
+
 ### 3.38 Every turbine map was being read as a compressor
 
 Three of the seventeen supplied workbooks would not load — `HighPqPTurbine`,
