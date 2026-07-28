@@ -557,6 +557,93 @@ def _state_from_flux_real(m: float, P: float, E: float, gas, supersonic: bool):
     return StaticState(p=p, T=T, rho=rho, u=u, M=u / c, c=c)
 
 
+def flow_function_real(M: float, T0: float, gas) -> float:
+    """``Φ = W√(RT₀)/(Ap₀)`` at a given Mach, for a gas whose ``γ`` moves.
+
+    For a calorically perfect gas ``Φ`` is a function of ``M`` alone, which is
+    why :func:`flow_function` takes no temperature. That is a consequence of
+    ``γ`` being constant, not a general truth: with ``cp(T)`` the static state
+    reached at a given Mach depends on where you started, so ``Φ`` depends on
+    ``T₀`` as well.
+
+    Solves ``u = M·a(T)`` against ``h(T₀) = h(T) + u²/2`` for ``T``, then forms
+    ``Φ`` from the isentropic pressure.
+    """
+    h0 = gas.enthalpy(T0)
+
+    def gap(T: float) -> float:
+        u = M * gas.speed_of_sound(T)
+        return gas.enthalpy(T) + 0.5 * u * u - h0
+
+    lo, hi = 1e-3 * T0, T0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if gap(mid) > 0.0:
+            hi = mid
+        else:
+            lo = mid
+        if hi - lo < 1e-13 * T0:
+            break
+    T = 0.5 * (lo + hi)
+    u = M * gas.speed_of_sound(T)
+    p = math.exp((gas.entropy_ref(T) - gas.entropy_ref(T0)) / gas.R)  # p/p0
+    rho_over_p0 = p / (gas.R * T)
+    return rho_over_p0 * u * math.sqrt(gas.R * T0)
+
+
+def max_flow_function_at(gas, T0: float) -> float:
+    """The sonic ``Φ``. Constant for a perfect gas, ``T₀``-dependent otherwise."""
+    if _is_calorically_perfect(gas):
+        return max_flow_function(gas)
+    return flow_function_real(1.0, T0, gas)
+
+
+def flow_function_at(M: float, gas, T0: float) -> float:
+    """``Φ(M)``, taking ``T₀`` only when the gas needs it."""
+    if _is_calorically_perfect(gas):
+        return flow_function(M, gas)
+    return flow_function_real(M, T0, gas)
+
+
+def exit_stagnation_from_map(
+    T01: float, p01: float, PR: float, eta: float, gas, kind: str = "compressor"
+) -> tuple[float, float, float]:
+    """Exit stagnation state from a map's ``PR`` and ``η``, at the real ``T₀₁``.
+
+    Returns ``(T₀₂, p₀₂, Δh₀)``.
+
+    **Why this replaces ``Δh₀ = CW·θ``.** The corrected-work field on a map is
+    ``cp·T_ref·(PR^κ − 1)/η``, which is a *derived* number carrying a constant
+    ``cp`` and the constant-``γ`` power law. Scaling it by ``θ`` to reach the
+    actual inlet is exact only for a calorically perfect gas. ``PR`` and ``η``
+    are the map's empirical content; the thermodynamics belongs at the
+    temperature the machine is actually running at, and on air ``cp`` moves
+    21.7% between 288 K and 1600 K.
+
+    So: take the isentrope to ``PR`` from the *actual* ``T₀₁``, take the ideal
+    enthalpy change across it, apply ``η`` in the direction the machine works,
+    and invert ``h`` for the exit temperature. A turbine stores ``PR`` as the
+    expansion ratio ``p₀₁/p₀₂`` and delivers less than ideal, so both the
+    isentrope and the efficiency go the other way (`PLAN.md` §3.38).
+
+    For a calorically perfect gas this reduces to the old expression exactly —
+    ``T₀₂ = T₀₁(1 + (PR^κ − 1)/η)`` — so that path is unchanged.
+    """
+    if PR <= 0.0:
+        raise ValueError(f"PR must be positive, got {PR!r}")
+    h1 = gas.enthalpy(T01)
+    if kind == "turbine":
+        T2s = gas.temperature_isentropic(T01, 1.0 / PR)
+        dh0 = (gas.enthalpy(T2s) - h1) * eta
+        p02 = p01 / PR
+    else:
+        T2s = gas.temperature_isentropic(T01, PR)
+        dh0 = (gas.enthalpy(T2s) - h1) / eta
+        p02 = p01 * PR
+    T02 = gas.temperature_from_enthalpy(h1 + dh0)
+    return T02, p02, dh0
+
+
 def choked_mass_flow(p0: float, T0: float, A: float, gas: PerfectGas) -> float:
     """Largest mass flow an area can pass at the given stagnation state."""
     return max_flow_function(gas) * A * p0 / math.sqrt(gas.R * T0)

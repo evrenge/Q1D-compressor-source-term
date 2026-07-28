@@ -177,7 +177,15 @@ class BetaMap:
         PR = stretch(self.PR)
         corrected_work = stretch(self.corrected_work)
 
-        tau = 1.0 + corrected_work / (self.gas.cp * T_REF)
+        if hasattr(self.gas, "cp"):
+            tau = 1.0 + corrected_work / (self.gas.cp * T_REF)
+        else:
+            h_ref = self.gas.enthalpy(T_REF)
+            tau = np.empty_like(corrected_work)
+            for idx in np.ndindex(corrected_work.shape):
+                tau[idx] = (
+                    self.gas.temperature_from_enthalpy(h_ref + corrected_work[idx]) / T_REF
+                )
         if np.any(tau <= 0.0):
             raise ValueError(f"{self.name}: densification produced a non-physical τ")
 
@@ -185,6 +193,24 @@ class BetaMap:
         # Both matter: a densified turbine that inherited the compressor forms
         # would silently become a compressor again one call after the loader
         # took care to decide otherwise.
+        if not hasattr(self.gas, "cp"):
+            h_ref = self.gas.enthalpy(T_REF)
+            efficiency = np.empty_like(PR)
+            for idx in np.ndindex(PR.shape):
+                pr_i = float(PR[idx])
+                if self.kind == "turbine":
+                    t2s = self.gas.temperature_isentropic(T_REF, 1.0 / pr_i)
+                    efficiency[idx] = corrected_work[idx] / (self.gas.enthalpy(t2s) - h_ref)
+                else:
+                    t2s = self.gas.temperature_isentropic(T_REF, pr_i)
+                    efficiency[idx] = (self.gas.enthalpy(t2s) - h_ref) / corrected_work[idx]
+            ecmf = Wc * np.sqrt(tau) * PR if self.kind == "turbine" else Wc * np.sqrt(tau) / PR
+            return BetaMap(
+                name=f"{self.name}×{factor}" + (f"/{nc_factor}" if nc_factor != factor else ""),
+                beta=beta, corrected_speed=speed, Wc=Wc, PR=PR, efficiency=efficiency,
+                corrected_work=corrected_work, ecmf=ecmf, gas=self.gas,
+                kind=self.kind, repaired_efficiency=self.repaired_efficiency,
+            )
         k = self.gas.gm1_over_g
         if self.kind == "turbine":
             efficiency = -corrected_work / (self.gas.cp * T_REF * (1.0 - PR**-k))
@@ -674,8 +700,10 @@ class ECMFMap:
             efficiency=self.efficiency,
             key_field=np.array(self.key_field),
             kind=np.array(self.kind),
-            gamma=np.array(self.gas.gamma),
-            cp=np.array(self.gas.cp),
+            gas_kind=np.array(type(self.gas).__name__),
+            gas_repr=np.array(getattr(self.gas, "name", "")),
+            gamma=np.array(getattr(self.gas, "gamma", float("nan"))),
+            cp=np.array(getattr(self.gas, "cp", float("nan"))),
         )
         return path if path.suffix else path.with_suffix(".npz")
 
@@ -911,6 +939,39 @@ def load_beta_map(
                     f"so there is nothing to interpolate from"
                 )
             eff[col, j] = np.interp(beta[col], beta[~col], eff[~col, j])
+
+    if not hasattr(gas, "cp"):
+        # Real gas: the same definition -- ideal enthalpy change across the map's
+        # PR from the reference condition, divided or multiplied by eta -- but
+        # with h and the isentrope taken from the polynomials rather than from a
+        # constant cp and a power law. Loop rather than vectorise: this is load
+        # time only, and `ECMFMap.save` means it is paid once (§3.45).
+        corrected_work = np.empty_like(PR)
+        h_ref = gas.enthalpy(T_REF)
+        it = np.nditer(PR, flags=["multi_index"])
+        for _ in it:
+            i = it.multi_index
+            pr_i, eta_i = float(PR[i]), float(eff[i])
+            if kind == "turbine":
+                t2s = gas.temperature_isentropic(T_REF, 1.0 / pr_i)
+                corrected_work[i] = (gas.enthalpy(t2s) - h_ref) * eta_i
+            else:
+                t2s = gas.temperature_isentropic(T_REF, pr_i)
+                corrected_work[i] = (gas.enthalpy(t2s) - h_ref) / eta_i
+        tau = np.empty_like(PR)
+        for idx in np.ndindex(PR.shape):
+            tau[idx] = gas.temperature_from_enthalpy(h_ref + corrected_work[idx]) / T_REF
+        if np.any(tau <= 0.0):
+            raise ValueError(f"{name}: non-physical temperature ratio derived from the map")
+        if kind == "turbine":
+            ecmf = Wc * np.sqrt(tau) * PR
+        else:
+            ecmf = Wc * np.sqrt(tau) / PR
+        return BetaMap(
+            name=name, beta=beta, corrected_speed=speed, Wc=Wc, PR=PR,
+            efficiency=eff, corrected_work=corrected_work, ecmf=ecmf, gas=gas,
+            kind=kind, repaired_efficiency=repaired,
+        )
 
     if kind == "compressor":
         # Work INTO the flow: actual rise is the isentropic rise over eta.

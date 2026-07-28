@@ -29,7 +29,11 @@ import numpy as np
 from .analytic import (
     InfeasibleOperatingPoint,
     StaticState,
+    _is_calorically_perfect,
+    exit_stagnation_from_map,
+    flow_function_at,
     max_flow_function,
+    max_flow_function_at,
     static_from_stagnation,
 )
 from .gas import PerfectGas
@@ -117,6 +121,15 @@ def _exit_stagnation(
     compressor form on a turbine raises the pressure while the energy equation
     lowers the temperature — a disk that compresses and cools at once.
     """
+    if not _is_calorically_perfect(gas):
+        # Real gas: use the map's empirical PR and eta at the ACTUAL inlet
+        # temperature rather than scaling a corrected work that was derived with
+        # a constant cp. On air that constant is wrong by 21.7% between 288 K
+        # and 1600 K, which moves a turbine's exit temperature 45-62 K.
+        T02, p02, _ = exit_stagnation_from_map(
+            T01, p01, point.PR, point.efficiency, gas, kind
+        )
+        return T02, p02
     theta = T01 / T_REF
     T02 = T01 + point.corrected_work * theta / gas.cp
     return T02, (p01 / point.PR if kind == "turbine" else point.PR * p01)
@@ -180,8 +193,8 @@ def design_from_map(
 
     from .analytic import flow_function
 
-    phi1 = flow_function(inlet_mach, gas)
-    phi_max = max_flow_function(gas)
+    phi1 = flow_function_at(inlet_mach, gas, T01)
+    phi_max = max_flow_function_at(gas, T01)
     if phi1 >= phi_max * CHOKE_MARGIN:
         raise InfeasibleOperatingPoint(
             f"inlet station would sit against the choke limit: Phi1={phi1:.6g} against "
@@ -375,7 +388,7 @@ def reachable_ecmf_range(
     gas = gas or beta_map.gas
     e, _, _, _, _ = beta_map._speed_line(corrected_speed)
     lo, hi = float(min(e[0], e[-1])), float(max(e[0], e[-1]))
-    phi_lim = max_flow_function(gas) * CHOKE_MARGIN
+    phi_lim = max_flow_function_at(gas, T01) * CHOKE_MARGIN
     theta, delta = T01 / T_REF, p01 / P_REF
 
     ok = []
@@ -426,7 +439,7 @@ def steady_profile(
         return (
             st.rho * st.u * A,
             (st.rho * st.u**2 + st.p) * A,
-            st.rho * st.u * (gas.cp * st.T + 0.5 * st.u**2) * A,
+            st.rho * st.u * (gas.enthalpy(st.T) + 0.5 * st.u**2) * A,
         )
 
     rho = np.empty(n_cells)
