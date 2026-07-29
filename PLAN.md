@@ -1367,6 +1367,38 @@ moved nothing, because the cost was per evaluation and not per iteration. Worth
 recording as a case where the obvious algorithmic improvement was not the
 bottleneck; the profile said so and a guess would not have.
 
+**Result.** Two compressors and two turbines, marched to steady state on both
+gases, `densify(9)`, 201 cells, `exit_offset = 3`. Compressors at standard day,
+turbines at the 1600 K / 1200 kPa of §3.39. Error is held mass flow against the
+design point:
+
+| map | PR | `T₀₂` | perfect | nasa9 **before** | nasa9 **after** |
+| --- | --- | --- | --- | --- | --- |
+| `SubsonicCompressor` | 2.218 | 368 | +1.82e−06 | −2.76e−04 | **+1.65e−06** |
+| `HighPqPCompr` | 21.86 | 770–791 | +2.12e−06 | −1.22e−04 | **+1.64e−06** |
+| `RadialTurbine` | 2.524 | 1347 | +9.16e−07 | −1.68e−02 | **+1.43e−06** |
+| `TwoStgTurbine` | 3.664 | 1224 | −1.66e−06 | −3.01e−02 | **−4.63e−07** |
+
+Every real-gas case now sits on the same ~2e−06 densify-9 interpolation floor the
+perfect gas does — `TwoStgTurbine` lands *below* its perfect-gas counterpart —
+so what is left is the map's resolution and not its thermodynamics. The turbine
+`T₀₂` columns are the point of the exercise: 1347 K against the perfect gas's
+1301, and 1224 against 1162. **A 40–60 K error in turbine exit temperature is
+what a calorically perfect gas was costing**, and it is not a rounding difference
+to anything downstream of the turbine.
+
+**The methodological note, since it is the same one five times.** Every defect
+here was hidden by the perfect gas being a *degenerate* case rather than an
+approximate one, and in three of the five the natural test was blind to it by
+construction: the constant-`cp`-down-the-real-branch test passes with the wrong
+eigenvector, the compressor sweep passes with the wrong `θ` scaling, and (5) only
+became visible once (4) was fixed and the turbines improved by 15% and stopped.
+What worked in each case was finding an **exact identity** the correct code must
+satisfy and the incorrect code cannot — datum invariance for the flux, the
+uniform-duct fixed point for the boundary, design-state-returns-design-key for
+the closure. Those are cheap, they need no marching, and they fail loudly. The
+marching runs confirmed; they did not diagnose.
+
 ### 3.44 The forty failures, and what is left after they are sorted
 
 The library sweep of §3.41 leaves 40 failures in 1428 cells. Measuring

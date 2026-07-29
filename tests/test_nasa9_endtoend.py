@@ -28,6 +28,10 @@ point, because the disk keys on a corrected quantity built from it.
 a perfect gas those are the same number, which is what corrected parameters *are*.
 On NASA9 air at a turbine's 1600 K they differ by 3.5%, shifting the key by
 1.7e-02.
+
+With all three fixed, the two supplied turbines hold to +1.4e-06 and -4.6e-07
+against a perfect-gas +9.2e-07 and -1.7e-06 — the same interpolation floor,
+reached from -1.7e-02 and -3.0e-02.
 """
 
 import math
