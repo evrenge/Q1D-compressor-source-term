@@ -1225,6 +1225,59 @@ four orders out, and it was §3.45 (6)'s `DuctDesign.dh0` — a defect that chan
 no flow quantity at all, so no amount of mass-flow gating would ever have shown
 it. After the fix that column reads +3.8e−07 and the case's worst is 1.55e−06.
 
+**How much the gas model itself is worth — 0D against 0D.** The table above says
+the solver reproduces whichever 0D model it is handed. It does not say how far
+apart the two 0D models are, and that is the number that decides whether carrying
+a real gas is worth 11.5× the step cost.
+
+Compared **at the same β**, not at the same fraction along the ECMF range. The
+ECMF axis is derived from `τ` and so differs between the gases (§3.45 (5)), so
+"half way along ECMF" lands on a *different* β for each and the comparison would
+mix a thermodynamic difference with a different operating point. At fixed β,
+`PR`, `Wc` and `η` are workbook data: `PR` and `Wc` come out bit-identical, `η`
+to 4.9e−09 (exactly 0 undensified — `densify` re-derives it from the interpolated
+`CW` and `PR` through a gas-dependent formula). Every delta below is the gas.
+
+| | `SubsonicCompr` | `HighPqPCompr` | `RadialTurbine` | `TwoStgTurbine` |
+| --- | --- | --- | --- | --- |
+| | PR 2.20, 288 K | PR 22.8, 288 K | PR 2.60, 1600 K | PR 3.94, 1600 K |
+| `W`, `p₀₂`, ICMF | 0 | 0 | 0 | 0 |
+| `τ` | −1.07e−03 | **−2.83e−02** | **+3.60e−02** | **+5.58e−02** |
+| `T₀₂` | −0.4 K | **−22.7 K** | **+46.5 K** | **+63.7 K** |
+| `Δh₀` / `SWx` | +3.55e−03 | −3.39e−03 | +2.69e−02 | +3.56e−02 |
+| `Fx` | +2.25e−03 | +2.27e−03 | +3.54e−02 | +3.60e−02 |
+| area | +2.29e−03 | +2.29e−03 | +3.58e−02 | +3.68e−02 |
+| `M₂` | +6.00e−04 | +1.88e−03 | +2.23e−02 | +2.64e−02 |
+| ECMF | −5.36e−04 | **−1.42e−02** | +1.36e−04 | +1.68e−04 |
+
+* **`W`, `p₀₂` and ICMF are identically zero.** They are `Wc` and `PR`, which are
+  workbook data. The gas model cannot move the mass flow at a given map point; it
+  moves everything *thermal*, and then the geometry that follows from it.
+* **The sign flips between the machines, and it is one mechanism.** Higher `cp`
+  means less temperature change for the same work, so a compressor's `τ` falls
+  and a turbine's rises.
+* **Expansion is where it bites** — `τ` moves 3.6–5.6% on the turbines against
+  0.1% on the low-PR compressor, because a turbine sits at 1600 K where `cp` is
+  22% above its 288 K value. A *high-PR* compressor is not exempt: `HighPqPCompr`
+  exits at 780–800 K and loses **22.7 K**.
+* **The duct itself changes by 2.3–3.7% in area.** Same map point, different
+  machine.
+
+The ECMF row inverts the `τ` ordering — −1.4e−02 on the high-PR compressor
+against +1.7e−04 on the turbines — and that is `reference_tau` working. The axis
+is defined at `T_ref`, so what matters is the isentrope *from 288 K*: the
+compressor's runs up to 780 K and a large `cp` excursion, the turbine's runs down
+to ~195 K and a small one. The turbine's 3.6% `τ` shift is absorbed entirely by
+the correction back to reference, which is the property that lets a real-gas map
+stay a static table.
+
+**Read the two tables together.** The gas model moves the answer by up to
+**5.6e−02**; the solver reproduces whichever model it is given to **2.8e−06**.
+Four orders of separation, so the Q1D discretisation is nowhere near the limiting
+error on either gas, and the choice of gas model is an engineering decision rather
+than a numerical detail — on a turbine it is a 47–64 K exit temperature, straight
+into whatever is downstream.
+
 **ICMF against ECMF.** Both track at ~1e−06 on both gases, so neither is
 disqualified as a comparison coordinate — but they are not equally tight, and the
 pattern is informative:
