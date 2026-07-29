@@ -1189,6 +1189,62 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.46 The real-gas 0D ↔ Q1D gate, and why it is not `zero_d_compressor`
+
+§3.45 measured the real gas by **held mass flow** — one number. That is a 0D ↔
+Q1D comparison of one quantity, not of the state, and the difference was not
+academic: comparing the *whole* state found a defect the mass-flow gate could not
+see, because the defect was in a quantity the mass flow does not depend on.
+
+**The 0D model here is `design_from_map`, not `analytic.zero_d_compressor`.** The
+latter cannot be used and this is worth stating rather than leaving as an
+omission: it is built on `compressor_exit_stagnation`'s
+`τ = 1 + (PR^κ − 1)/η`, which is the constant-`cp` correlation, and it is
+compressor-only besides. `design_from_map` is the real-gas 0D model — a map point
+and an inlet stagnation state give both station states, both source terms and the
+back pressure, algebraically, with no PDE anywhere. Marching from that design and
+reading the converged stations back off the *fluxes* (§3.23) is the comparison.
+
+Thirteen quantities per case: `W`, `T₀₁`, `p₀₁`, `T₀₂`, `p₀₂`, `M₁`, `M₂`, `p₁`,
+`p₂`, `Fx`, `SWx`, ICMF and ECMF. Worst relative error over all thirteen:
+
+| case | perfect | nasa9 |
+| --- | --- | --- |
+| `SubsonicCompressor` | 2.37e−06 | **2.24e−06** |
+| `HighPqPCompr` | 2.77e−06 | **2.14e−06** |
+| `RadialTurbine` | 9.90e−07 | **1.55e−06** |
+| `TwoStgTurbine` | 1.76e−06 | **1.24e−06** |
+
+The real gas matches its 0D model as well as the perfect gas matches its own —
+better on three of the four — so the Phase 4 gate is met on the state and not
+merely on the flow.
+
+**What the extra columns bought.** `SWx` on the NASA9 `RadialTurbine` came out at
+**2.20e−02** while every other column on the same run sat at 1e−06. One column,
+four orders out, and it was §3.45 (6)'s `DuctDesign.dh0` — a defect that changes
+no flow quantity at all, so no amount of mass-flow gating would ever have shown
+it. After the fix that column reads +3.8e−07 and the case's worst is 1.55e−06.
+
+**ICMF against ECMF.** Both track at ~1e−06 on both gases, so neither is
+disqualified as a comparison coordinate — but they are not equally tight, and the
+pattern is informative:
+
+| case | ICMF | ECMF |
+| --- | --- | --- |
+| `SubsonicCompressor` | +1.65e−06 | +1.91e−06 |
+| `HighPqPCompr` | +1.64e−06 | **−1.79e−09** |
+| `RadialTurbine` | +1.44e−06 | −1.25e−06 |
+| `TwoStgTurbine` | −4.63e−07 | +4.29e−07 |
+
+On `HighPqPCompr` the exit key is **three orders tighter** than the inlet one,
+and that is not luck: ECMF is what the closure is keyed on, so the converged
+state reproduces it by construction while ICMF is free to carry the mass-flow
+error. At PR 21.9 the inlet and exit corrected flows differ by a factor of 13, so
+the same absolute discrepancy is a much smaller *relative* one at the exit. The
+two agree closely at low PR and diverge as PR rises — which is the same
+conditioning argument §3.26 made for keying on ECMF in the first place, showing
+up again in the error budget rather than in the rank.
+
 ### 3.45 NASA9: five defects invisible to a perfect gas, and two unmigrated corners
 
 The reason to carry a real gas at all is one number: on air `cp` rises **21.7%**
@@ -3966,7 +4022,9 @@ perfect-gas branch is the old expression unchanged. Asserted directly in
 one on a constant-`cp` gas) and in `tests/test_nasa9_endtoend.py` for the map,
 design, split and disk paths.
 
-*Real-gas 0D ↔ Q1D at the Phase 3 tolerance* is §3.46. Note that the canonical
+*Real-gas 0D ↔ Q1D at the Phase 3 tolerance* is §3.46: thirteen quantities per
+case, worst relative error **2.24e−06** across two compressors and two turbines,
+against 2.77e−06 for the same cases on the perfect gas. Note that the canonical
 `analytic.zero_d_compressor` is **not** the 0D model used, and cannot be: it is
 built on `compressor_exit_stagnation`'s `τ = 1 + (PR^κ − 1)/η` and is perfect-gas
 only. `design_from_map` is the real-gas 0D model — a map point plus an inlet
