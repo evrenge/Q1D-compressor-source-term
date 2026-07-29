@@ -48,7 +48,7 @@ from q1d.analytic import (
 )
 from q1d.boundary import StagnationInletStaticOutlet
 from q1d.compressor import EcmfCompressor, _exit_from_point, _reference_tau
-from q1d.design import _exit_stagnation, design_from_map
+from q1d.design import _exit_stagnation, design_from_map, split_equal_work
 from q1d.gas import PerfectGas
 from q1d.grid import Grid
 from q1d.maps import P_REF, T_REF, ECMFMap, load_beta_map
@@ -266,6 +266,108 @@ class TestTheMeasuredKeyIsCorrectedToTheReference:
             1600.0, 1.2e6, point.PR, point.efficiency, PERFECT, "turbine"
         )
         assert T02 / 1600.0 == pytest.approx(self._map_tau(point, PERFECT), rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Equal-work splitting
+# ---------------------------------------------------------------------------
+
+
+class TestTheDesignReportsTheWorkItActuallyDoes:
+    """``DuctDesign.dh0`` — and so ``SWx``, and so every harness's initial
+    profile — was still ``CW·θ``. Same defect as the disk's, one layer up."""
+
+    def test_the_design_work_matches_its_own_two_stagnation_states(self, nasa9,
+                                                                  tmp_path):
+        m = load_beta_map(turbine_workbook(tmp_path / "t.xlsx"), nasa9).densify(9)
+        line = m._speed_line(0.9)[0]
+        d = design_from_map(m, 0.9, 0.5 * (float(line.min()) + float(line.max())),
+                            inlet_mach=0.25, T01=1600.0, p01=1.2e6)
+        assert d.dh0 == pytest.approx(
+            nasa9.enthalpy(d.T02) - nasa9.enthalpy(d.T01), rel=1e-12
+        )
+        assert d.SWx == pytest.approx(d.W * d.dh0, rel=1e-15)
+
+    def test_the_corrected_work_scaling_would_have_been_wrong(self, nasa9, tmp_path):
+        """The premise: at ``θ = 5.55`` the old expression is 2% out, which is
+        four orders past anything else in this file."""
+        m = load_beta_map(turbine_workbook(tmp_path / "t.xlsx"), nasa9).densify(9)
+        line = m._speed_line(0.9)[0]
+        d = design_from_map(m, 0.9, 0.5 * (float(line.min()) + float(line.max())),
+                            inlet_mach=0.25, T01=1600.0, p01=1.2e6)
+        old = d.point.corrected_work * d.theta
+        assert abs(old / d.dh0 - 1.0) > 0.01
+
+    def test_the_perfect_gas_design_work_is_bit_identical(self):
+        m = load_beta_map(COMPRESSOR, PERFECT).densify(9)
+        line = m._speed_line(1.0)[0]
+        d = design_from_map(m, 1.0, 0.5 * (float(line.min()) + float(line.max())),
+                            inlet_mach=0.45, T01=400.0)
+        assert d.dh0 == d.point.corrected_work * d.theta
+
+
+class TestTheEqualWorkSplitTakesTheRealGas:
+    """`split_equal_work` opens one map point into ``n`` equal-Δh₀ nodes so that
+    interstage bleed has somewhere to go. It was written on the power law —
+    ``PR_k = (T₀,ₖ₊₁/T₀,ₖ)^(η_p/κ)`` — which needs a constant ``cp`` twice over,
+    for ``κ`` and for ``Δh₀ = cp·ΔT``. On a ``Nasa9Gas`` it raised outright.
+
+    The general form is the entropy one: ``R ln PR_k = η_p·Δs°_k``. It still
+    telescopes, because ``Σ Δs°_k`` is the overall ``Δs°`` whatever the gas —
+    which is the property that makes the split mean anything, since a chain that
+    did not reproduce the machine's own ``PR`` would be a different machine."""
+
+    @staticmethod
+    def _chain_pr(stations, kind):
+        first, last = stations[0][1], stations[-1][1]
+        return first / last if kind == "turbine" else last / first
+
+    @pytest.mark.parametrize("n", [1, 2, 4, 8])
+    @pytest.mark.parametrize("T01", [288.15, 700.0])
+    def test_a_compressor_chain_reproduces_the_map_pressure_ratio(self, nasa9, n, T01):
+        m = load_beta_map(COMPRESSOR, nasa9).densify(9)
+        line = m._speed_line(1.0)[0]
+        point = m.evaluate_at_ecmf(0.5 * (float(line.min()) + float(line.max())), 1.0)
+        st = split_equal_work(point, n, T01, 101325.0, nasa9, "compressor")
+        assert len(st) == n + 1
+        assert self._chain_pr(st, "compressor") == pytest.approx(point.PR, rel=1e-12)
+
+    @pytest.mark.parametrize("n", [1, 2, 4, 8])
+    def test_a_turbine_chain_reproduces_the_map_pressure_ratio(self, nasa9, tmp_path, n):
+        m = load_beta_map(turbine_workbook(tmp_path / "t.xlsx"), nasa9).densify(9)
+        line = m._speed_line(0.9)[0]
+        point = m.evaluate_at_ecmf(0.5 * (float(line.min()) + float(line.max())), 0.9)
+        st = split_equal_work(point, n, 1600.0, 1.2e6, nasa9, "turbine")
+        assert self._chain_pr(st, "turbine") == pytest.approx(point.PR, rel=1e-12)
+        assert st[-1][0] < st[0][0], "a turbine must cool along the chain"
+
+    @pytest.mark.parametrize("n", [2, 4, 8])
+    def test_the_work_per_node_really_is_equal_in_enthalpy(self, nasa9, n):
+        """Equal Δh₀, not equal ΔT. On a real gas those are different splits, and
+        it is the enthalpy one that conserves energy across the chain."""
+        m = load_beta_map(COMPRESSOR, nasa9).densify(9)
+        line = m._speed_line(1.0)[0]
+        point = m.evaluate_at_ecmf(0.5 * (float(line.min()) + float(line.max())), 1.0)
+        st = split_equal_work(point, n, 288.15, 101325.0, nasa9, "compressor")
+        pairs = list(zip(st[:-1], st[1:], strict=True))
+        steps = [nasa9.enthalpy(b[0]) - nasa9.enthalpy(a[0]) for a, b in pairs]
+        assert max(steps) == pytest.approx(min(steps), rel=1e-10)
+        dT = [b[0] - a[0] for a, b in pairs]
+        assert max(dT) / min(dT) - 1.0 > 1e-3, (
+            "premise gone: equal Δh₀ has become equal ΔT, so cp is not moving"
+        )
+
+    def test_the_perfect_gas_split_is_unchanged(self):
+        """The entropy form collapses to the power law at constant ``cp``, so the
+        staging results already in `PLAN.md` are not being re-derived."""
+        m = load_beta_map(COMPRESSOR, PERFECT).densify(9)
+        line = m._speed_line(1.0)[0]
+        point = m.evaluate_at_ecmf(0.5 * (float(line.min()) + float(line.max())), 1.0)
+        for n in (1, 2, 4, 8):
+            st = split_equal_work(point, n, 288.15, 101325.0, PERFECT, "compressor")
+            assert self._chain_pr(st, "compressor") == pytest.approx(point.PR, rel=1e-13)
+            dT = [b[0] - a[0] for a, b in zip(st[:-1], st[1:], strict=True)]
+            assert max(dT) == pytest.approx(min(dT), rel=1e-12), "constant cp: equal ΔT"
 
 
 # ---------------------------------------------------------------------------

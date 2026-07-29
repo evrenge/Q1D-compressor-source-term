@@ -1189,7 +1189,7 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
-### 3.45 NASA9: five defects, every one of them invisible to a perfect gas
+### 3.45 NASA9: five defects invisible to a perfect gas, and two unmigrated corners
 
 The reason to carry a real gas at all is one number: on air `cp` rises **21.7%**
 between 288 K and 1600 K, and `γ` falls 1.3988 → 1.3061. A compressor at
@@ -1386,6 +1386,33 @@ so what is left is the map's resolution and not its thermodynamics. The turbine
 1301, and 1224 against 1162. **A 40–60 K error in turbine exit temperature is
 what a calorically perfect gas was costing**, and it is not a rounding difference
 to anything downstream of the turbine.
+
+**(6) Two places the migration simply had not reached.** Distinct in kind from
+the five above — these were not silently wrong, and one of them was not wrong at
+all until asked:
+
+* `design.split_equal_work`, the equal-Δh₀ splitter that opens one map point into
+  several nodes for interstage bleed, was written on the power law and **raised
+  outright** on a `Nasa9Gas`. The general statement is the entropy one,
+  `R ln PR_k = η_p·Δs°_k`, which still telescopes because `Σ Δs°_k` is the
+  overall `Δs°` whatever the gas — so the chain reproduces the machine's own `PR`
+  at any node count, measured to **1e-16** at n = 1, 2, 4, 8 on both machines and
+  at `θ ≠ 1`. The perfect-gas branch is kept verbatim, because the split's
+  contract there is that it delivers the map's *corrected work*, and routing it
+  through `PR`/`η` instead would move it by the map's own interpolation
+  inconsistency (`densify` refines `CW` and `PR`/`η` independently, so off a grid
+  node they stop implying each other — ~1e-06, and not a correction to anything).
+* `DuctDesign.dh0` was still `CW·θ` — **defect (4) one layer up, in the 0D
+  model's own report of the same quantity.** It survived the disk fix because the
+  disk and the design are different code. Worth **−2.15e−02** on a NASA9
+  `RadialTurbine`, and it propagates: `SWx` is built on it and every harness in
+  this project seeds its initial profile from `SWx`. Taken from the design's own
+  two stagnation temperatures now, which is exact for either gas.
+
+The second of those is the one worth remembering: **fixing a defect in one place
+does not fix it in the other place that has the same expression.** §3.45 (4)
+collapsed four disk classes into one helper precisely so this could not happen,
+and then it happened anyway, in a class the helper does not serve.
 
 **The methodological note, since it is the same one five times.** Every defect
 here was hidden by the perfect gas being a *degenerate* case rather than an
@@ -3930,11 +3957,22 @@ be made to read a map the same way** (§3.45 (4)). `Δh₀ = CW·θ` is a consta
 identity, and a turbine at `θ = 5.55` is where that stops being a rounding
 difference.
 
-**Gate:** met. Exact recovery of the perfect-gas path is structural — every
-changed site branches on whether the gas advertises a constant `γ`, and the
-perfect-gas branch is bit-identical — and is asserted directly in
-`tests/test_realgas_flux.py` (real-gas branch reproduces the perfect-gas Roe flux
-on a constant-`cp` gas) and `tests/test_nasa9_endtoend.py`.
+**Gate:** met, both halves.
+
+*Exact recovery of the perfect-gas results* is structural rather than measured:
+every changed site branches on whether the gas advertises a constant `γ`, and the
+perfect-gas branch is the old expression unchanged. Asserted directly in
+`tests/test_realgas_flux.py` (the real-gas Roe branch reproduces the perfect-gas
+one on a constant-`cp` gas) and in `tests/test_nasa9_endtoend.py` for the map,
+design, split and disk paths.
+
+*Real-gas 0D ↔ Q1D at the Phase 3 tolerance* is §3.46. Note that the canonical
+`analytic.zero_d_compressor` is **not** the 0D model used, and cannot be: it is
+built on `compressor_exit_stagnation`'s `τ = 1 + (PR^κ − 1)/η` and is perfect-gas
+only. `design_from_map` is the real-gas 0D model — a map point plus an inlet
+stagnation state give both station states, both source terms and the back
+pressure, with no PDE anywhere — and that is what the Q1D solution is compared
+against.
 
 ### Phase 5 — Real compressor maps
 

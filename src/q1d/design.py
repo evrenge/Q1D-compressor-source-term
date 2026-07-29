@@ -81,8 +81,22 @@ class DuctDesign:
 
     @property
     def dh0(self) -> float:
-        """Actual specific work at this inlet temperature [J/kg]."""
-        return self.point.corrected_work * self.theta
+        """Actual specific work at this inlet temperature [J/kg].
+
+        Taken from the design's own two stagnation temperatures rather than from
+        ``CW·θ``. The two are the same thing for a calorically perfect gas and
+        that branch returns the old expression bit for bit; for a real gas
+        ``CW·θ`` is the constant-``cp`` scaling and is wrong off ``θ = 1`` —
+        **−2.15e−02** on a NASA9 `RadialTurbine` at 1600 K (``PLAN.md`` §3.45).
+
+        This is the same defect as §3.45 (4) and it survived the fix there,
+        because that one corrected the *disk* and this is the **0D model's**
+        report of the same quantity. It propagates: ``SWx`` is built on it, and
+        every harness in this project seeds its initial profile from ``SWx``.
+        """
+        if _is_calorically_perfect(self.gas):
+            return self.point.corrected_work * self.theta
+        return self.gas.enthalpy(self.T02) - self.gas.enthalpy(self.T01)
 
     @property
     def Fx(self) -> float:
@@ -303,11 +317,11 @@ def split_equal_work(
 
     .. math::
 
-        PR_k = \left(\frac{T_{0,k+1}}{T_{0,k}}\right)^{\eta_p/\kappa}
+        R\ln PR_k = \eta_p\,[s^\circ(T_{0,k+1}) - s^\circ(T_{0,k})]
         \quad\Longrightarrow\quad
-        \prod_k PR_k = \left(\frac{T_{0,n}}{T_{0,0}}\right)^{\eta_p/\kappa}
+        R\ln\prod_k PR_k = \eta_p\,[s^\circ(T_{0,n}) - s^\circ(T_{0,0})]
 
-    which is **independent of ``n``** — the product telescopes. So the chain
+    which is **independent of ``n``** — the product telescopes, for any gas. So the chain
     reproduces the map's own pressure ratio at any node count, which is the
     property that makes the split mean anything. ``η_p`` is derived from the
     map's isentropic ``η`` and ``PR`` rather than supplied.
@@ -325,39 +339,95 @@ def split_equal_work(
             f"the isentropic bookkeeping below has no meaning"
         )
 
-    dh0_total = point.corrected_work * (T01 / T_REF)
-    k = gas.gm1_over_g
     pr = float(point.PR)
+    if _is_calorically_perfect(gas):
+        # Unchanged, deliberately down to the last bit. The split's contract on a
+        # perfect gas is that it delivers the map's *corrected work* -- that is
+        # what `tests/test_staging.py` pins at rel 1e-12 and what §3.43's staging
+        # results were measured against. Routing this branch through `PR`/`η`
+        # instead would move it by the map's own interpolation inconsistency
+        # (`CW` and `PR`/`η` are refined independently by `densify`, so off a
+        # grid node they stop implying each other), which is ~1e-06 and not a
+        # correction to anything.
+        dh0_total = point.corrected_work * (T01 / T_REF)
+        k = gas.gm1_over_g
+        tau_total = 1.0 + dh0_total / (gas.cp * T01)
+        if tau_total <= 0.0:
+            raise InfeasibleOperatingPoint(
+                f"splitting gives a non-physical overall temperature ratio {tau_total:.6g}"
+            )
+        if kind == "turbine":
+            eta_p = math.log(tau_total) / (-k * math.log(pr))
+        else:
+            eta_p = k * math.log(pr) / math.log(tau_total)
+        dh0 = dh0_total / n_nodes
+        stations = [(T01, p01)]
+        for _ in range(n_nodes):
+            T0, p0 = stations[-1]
+            T0n = T0 + dh0 / gas.cp
+            if T0n <= 0.0:
+                raise InfeasibleOperatingPoint(
+                    f"node {len(stations)} would reach T0={T0n:.6g} K: the split asks "
+                    f"for more enthalpy than the flow carries"
+                )
+            # Same exponent both ways; for a turbine eta_p enters reciprocally
+            # because PR is stored the other way up, and p0 falls.
+            step = ((T0n / T0) ** (eta_p / k) if kind != "turbine"
+                    else (T0 / T0n) ** (1.0 / (k * eta_p)))
+            stations.append((T0n, p0 * step if kind != "turbine" else p0 / step))
+        return stations
+
+    # Real gas from here. `CW·θ` is the constant-cp scaling and is wrong off
+    # `θ = 1` (§3.45 (4)), so take the exit state the machine actually reaches
+    # from THIS inlet, through the map's `PR` and `η`, the way the disk does.
+    T02, p02, dh0_total = exit_stagnation_from_map(T01, p01, pr, eta, gas, kind)
 
     # Polytropic efficiency implied by the map's isentropic pair, so the caller
-    # supplies nothing that is not already in the map. Compressor:
-    #   tau = 1 + (PR^k - 1)/eta  and  tau = PR^(k/eta_p).
-    # Turbine, with PR the expansion ratio p01/p02:
-    #   tau = 1 - eta*(1 - PR^-k)  and  tau = PR^(-k*eta_p).
-    tau_total = 1.0 + dh0_total / (gas.cp * T01)
-    if tau_total <= 0.0:
+    # supplies nothing that is not already in the map.
+    #
+    # Stated on ENTROPY rather than on the power law, because that form is
+    # general. Along a polytropic path `dh = T ds + v dp` with `v dp = η_p dh`
+    # (compressor) gives `T ds = (1 − η_p) dh`, and `∫dh/T = ∫cp dT/T = Δs°`, so
+    #
+    #     s°(T₀₂) − s°(T₀₁) − R ln(p₀₂/p₀₁) = (1 − η_p)·[s°(T₀₂) − s°(T₀₁)]
+    #     ⟹  η_p = R ln(p₀₂/p₀₁) / [s°(T₀₂) − s°(T₀₁)]
+    #
+    # and the turbine, where `v dp = dh/η_p`, gives the reciprocal. For constant
+    # cp, `s° = cp ln T` collapses both to the power-law forms above — `η_p =
+    # κ ln PR / ln τ` and `η_p = ln τ / (−κ ln PR)` — which is why the two
+    # branches are the same statement and not two models.
+    sigma = gas.entropy_ref(T02) - gas.entropy_ref(T01)
+    if sigma == 0.0:
         raise InfeasibleOperatingPoint(
-            f"splitting gives a non-physical overall temperature ratio {tau_total:.6g}"
+            "splitting needs a non-zero temperature change across the machine"
         )
-    if kind == "turbine":
-        eta_p = math.log(tau_total) / (-k * math.log(pr))
-    else:
-        eta_p = k * math.log(pr) / math.log(tau_total)
+    r_ln_pi = gas.R * math.log(p02 / p01)
+    eta_p = sigma / r_ln_pi if kind == "turbine" else r_ln_pi / sigma
 
     dh0 = dh0_total / n_nodes
+    h = gas.enthalpy(T01)
     stations = [(T01, p01)]
     for _ in range(n_nodes):
         T0, p0 = stations[-1]
-        T0n = T0 + dh0 / gas.cp
+        h += dh0
+        try:
+            T0n = gas.temperature_from_enthalpy(h)
+        except ValueError as ex:  # the inversion ran off the tabulated range
+            raise InfeasibleOperatingPoint(
+                f"node {len(stations)} has no temperature for h0={h:.6g} J/kg: the "
+                f"split asks for more enthalpy than the flow carries"
+            ) from ex
         if T0n <= 0.0:
             raise InfeasibleOperatingPoint(
                 f"node {len(stations)} would reach T0={T0n:.6g} K: the split asks for "
                 f"more enthalpy than the flow carries"
             )
-        # Same exponent both ways; for a turbine eta_p enters reciprocally
-        # because PR is stored the other way up, and p0 falls.
-        step = (T0n / T0) ** (eta_p / k) if kind != "turbine" else (T0 / T0n) ** (1.0 / (k * eta_p))
-        stations.append((T0n, p0 * step if kind != "turbine" else p0 / step))
+        # Same statement per node as the one that defined `eta_p`, so the
+        # pressure ratios telescope to the machine's own at any node count --
+        # `Σ Δs°_k` is `σ` by construction, whatever the gas.
+        ds = gas.entropy_ref(T0n) - gas.entropy_ref(T0)
+        exponent = ds / eta_p if kind == "turbine" else eta_p * ds
+        stations.append((T0n, p0 * math.exp(exponent / gas.R)))
     return stations
 
 
