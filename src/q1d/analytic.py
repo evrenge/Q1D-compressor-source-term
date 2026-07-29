@@ -53,7 +53,10 @@ __all__ = [
     "max_flow_function",
     "mach_from_flow_function",
     "static_from_stagnation",
+    "stagnation_from_static",
     "state_from_flux",
+    "exit_stagnation_from_map",
+    "reference_tau",
     "choked_mass_flow",
     "compressor_exit_stagnation",
     "compressor_source_terms",
@@ -348,6 +351,50 @@ def _is_calorically_perfect(gas) -> bool:
     return hasattr(gas, "gamma")
 
 
+def _bracketed_root(f, lo, hi, f_lo, f_hi, tol, max_iter=100):
+    """Illinois regula falsi on a sign-changing bracket ``[lo, hi]``.
+
+    Every real-gas inversion here is a root-find on a function with no closed
+    form, and the first versions all bisected. Bisection needs ~43 evaluations to
+    reach 1e-13 of the bracket width; Illinois reaches it in about a dozen, never
+    leaves the bracket (so the *branch* the caller chose — subsonic or
+    supersonic — cannot be lost), and needs no derivative.
+
+    Worth having because these inversions dominate a NASA9 solver step — profiled
+    at 88% of it, ``_static_from_stagnation_real`` and ``_state_from_flux_real``
+    together — though the bulk of the speedup measured in ``PLAN.md`` §3.45 came
+    from making each *evaluation* cheap rather than from making them fewer.
+
+    ``f_lo`` and ``f_hi`` are supplied rather than computed because the callers
+    already know them from setting up the bracket. ``tol`` is an absolute width
+    on the bracket, in the units of ``lo``/``hi``.
+    """
+    x = 0.5 * (lo + hi)
+    for _ in range(max_iter):
+        if f_hi == f_lo:
+            break
+        nxt = hi - f_hi * (hi - lo) / (f_hi - f_lo)
+        if not lo < nxt < hi:  # a flat end can throw the secant outside
+            nxt = 0.5 * (lo + hi)
+        moved, x = abs(nxt - x), nxt
+        fx = f(x)
+        # Converged on the ITERATE, not on the bracket. Illinois drives the
+        # iterate to the root far faster than it collapses the bracket -- the
+        # retained end only halves -- so testing the bracket width alone costs
+        # roughly twice the evaluations for the same answer.
+        if fx == 0.0 or moved < tol:
+            return x
+        if (fx > 0.0) == (f_lo > 0.0):
+            lo, f_lo = x, fx
+            f_hi *= 0.5  # Illinois: halve the retained end so it cannot stick
+        else:
+            hi, f_hi = x, fx
+            f_lo *= 0.5
+        if hi - lo < tol:
+            break
+    return 0.5 * (lo + hi)
+
+
 def _sonic_temperature(T0: float, gas, lo: float = 1.0) -> float:
     """The static temperature at which ``u`` reaches ``a``, for a real gas.
 
@@ -362,17 +409,10 @@ def _sonic_temperature(T0: float, gas, lo: float = 1.0) -> float:
         return 2.0 * (h0 - gas.enthalpy(T)) - gas.gamma_at(T) * gas.R * T
 
     hi = T0
-    if gap(hi) > 0.0:
+    g_hi = gap(hi)
+    if g_hi > 0.0:
         return hi
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        if gap(mid) > 0.0:
-            lo = mid
-        else:
-            hi = mid
-        if hi - lo < 1e-12 * T0:
-            break
-    return 0.5 * (lo + hi)
+    return _bracketed_root(gap, lo, hi, gap(lo), g_hi, tol=1e-12 * T0)
 
 
 def _static_from_stagnation_real(
@@ -408,23 +448,19 @@ def _static_from_stagnation_real(
             f"T0={T0:.6g} K, p0={p0:.6g} Pa, A={A:.6g} m^2 on {getattr(gas, 'name', gas)}"
         )
 
+    # mass_flux rises toward T_star from both sides, so `mass_flux - W` falls
+    # with T on the subsonic branch and rises with T on the supersonic one.
+    # Either orientation is a sign-changing bracket, which is all the root-find
+    # needs.
     if supersonic:
         lo, hi = 1e-3 * T0, T_star
     else:
         lo, hi = T_star, T0 * (1.0 - 1e-15)
 
-    # mass_flux rises toward T_star from both sides, so it FALLS with T on the
-    # subsonic branch and RISES with T on the supersonic one. `lo` is held as
-    # the sonic side in both cases, which is what makes the update uniform.
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        if (mass_flux(mid) > W) != supersonic:
-            lo = mid
-        else:
-            hi = mid
-        if hi - lo < 1e-13 * T0:
-            break
-    T = 0.5 * (lo + hi)
+    def excess(T: float) -> float:
+        return mass_flux(T) - W
+
+    T = _bracketed_root(excess, lo, hi, excess(lo), excess(hi), tol=1e-13 * T0)
 
     p = p0 * math.exp((gas.entropy_ref(T) - gas.entropy_ref(T0)) / gas.R)
     rho = p / (gas.R * T)
@@ -521,17 +557,14 @@ def _state_from_flux_real(m: float, P: float, E: float, gas, supersonic: bool):
 
     # Sonic point: u = a(T(u)). u rises, a falls once past the parabola's peak,
     # so the crossing is unique on (0, u_max).
+    def sonic_gap(u: float) -> float:
+        T = T_of(u)
+        return u - (gas.speed_of_sound(T) if T > 0.0 else 0.0)
+
     lo, hi = 1e-9 * u_max, u_max * (1.0 - 1e-12)
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        T = T_of(mid)
-        if T <= 0.0 or mid > gas.speed_of_sound(T):
-            hi = mid
-        else:
-            lo = mid
-        if hi - lo < 1e-14 * u_max:
-            break
-    u_star = 0.5 * (lo + hi)
+    u_star = _bracketed_root(
+        sonic_gap, lo, hi, sonic_gap(lo), sonic_gap(hi), tol=1e-14 * u_max
+    )
 
     lo, hi = (1e-9 * u_max, u_star) if not supersonic else (u_star, u_max * (1.0 - 1e-12))
     g_lo, g_hi = gap(lo), gap(hi)
@@ -540,15 +573,7 @@ def _state_from_flux_real(m: float, P: float, E: float, gas, supersonic: bool):
             f"no {'supersonic' if supersonic else 'subsonic'} state produces this flux: "
             f"m={m:.6g}, P={P:.6g}, E={E:.6g} on {getattr(gas, 'name', gas)}"
         )
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        if gap(mid) * g_lo > 0.0:
-            lo, g_lo = mid, gap(mid)
-        else:
-            hi = mid
-        if hi - lo < 1e-14 * u_max:
-            break
-    u = 0.5 * (lo + hi)
+    u = _bracketed_root(gap, lo, hi, g_lo, g_hi, tol=1e-14 * u_max)
 
     p = P - m * u
     rho = m / u
@@ -664,6 +689,49 @@ def exit_stagnation_from_map(
         p02 = p01 * PR
     T02 = gas.temperature_from_enthalpy(h1 + dh0)
     return T02, p02, dh0
+
+
+def reference_tau(
+    T01: float, T02: float, pressure_ratio: float, gas, T_ref: float
+) -> float:
+    """The ``τ`` a map *tabulates*, from a state measured at a running ``T₀₁``.
+
+    A map's ECMF axis is ``Wc·√τ/PR`` (compressor) or ``Wc·√τ·PR`` (turbine) with
+    ``τ`` derived **at the reference temperature**, because that is what
+    "corrected" means. A disk keying on ECMF measures ``τ = T₀₂/T₀₁`` from the
+    field, at whatever temperature the machine is actually running at.
+
+    For a calorically perfect gas those are the same number — ``τ`` is a
+    similarity invariant, which is the whole basis of corrected parameters — and
+    the distinction is invisible. **It is not an invariant for a real gas.**
+    Measured on `RadialTurbine` at PR 2.524, η 0.804: ``τ`` is 0.81328 at 288.15 K
+    and 0.84163 at 1600 K, a 3.5% gap that shifts the ECMF key by **+1.7e−02** and
+    put the held mass flow 1.4e−02 off its design point (``PLAN.md`` §3.45 (5)).
+    The perfect gas moves 6e−07 over the same span.
+
+    So correct the measurement back before indexing the table. ``η`` is the
+    dimensionless thing the map actually tabulates, so take it from the measured
+    state, apply it to the isentrope at ``T_ref``, and re-derive ``τ`` there::
+
+        Δh₀ = h(T₀₂) − h(T₀₁),   Δh₀ˢ = h(T₂ˢ(T₀₁, PR)) − h(T₀₁)
+        CW  = [h(T₂ˢ(T_ref, PR)) − h(T_ref)] · Δh₀/Δh₀ˢ
+        τ   = h⁻¹(h(T_ref) + CW) / T_ref
+
+    ``η`` cancels out of that composition, and with it the compressor/turbine
+    branch: a compressor divides by ``η`` where a turbine multiplies, and the
+    isentropic ratio flips the same way, so one expression serves both.
+
+    ``pressure_ratio`` is the *true* ``p₀₂/p₀₁`` — below 1 for a turbine — not the
+    map's above-1 convention.
+    """
+    h1 = gas.enthalpy(T01)
+    dh0 = gas.enthalpy(T02) - h1
+    dh0s = gas.enthalpy(gas.temperature_isentropic(T01, pressure_ratio)) - h1
+    if dh0s == 0.0:  # unit pressure ratio: nothing to correct
+        return T02 / T01
+    h_ref = gas.enthalpy(T_ref)
+    dh0s_ref = gas.enthalpy(gas.temperature_isentropic(T_ref, pressure_ratio)) - h_ref
+    return gas.temperature_from_enthalpy(h_ref + dh0s_ref * dh0 / dh0s) / T_ref
 
 
 def choked_mass_flow(p0: float, T0: float, A: float, gas: PerfectGas) -> float:

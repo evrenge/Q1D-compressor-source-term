@@ -1189,6 +1189,184 @@ On `HPC01` the runs that used to die at steps **683, 95, 47 and 36** (Nc 0.8,
 0.9, 1.0, 1.05) now survive; on `SubsonicCompressor` Nc 1.1 and 1.2, failures at
 steps 3763 and 362 are gone.
 
+### 3.45 NASA9: five defects, every one of them invisible to a perfect gas
+
+The reason to carry a real gas at all is one number: on air `cp` rises **21.7%**
+between 288 K and 1600 K, and `γ` falls 1.3988 → 1.3061. A compressor at
+standard-day inlet barely notices, which is why every perfect-gas result in this
+document stands. A turbine runs at turbine-entry conditions and §3.39 puts them
+at 1600 K, squarely in the range where a calorically perfect gas is the wrong
+model rather than an approximate one.
+
+`Nasa9Gas` reads coefficients from Cantera's `airNASA9.yaml` once and evaluates
+them here — `cp/R`, `h/RT` and `s°/R` as the standard nine-term polynomials, over
+three temperature regions, checked against Cantera to **1.6e−09** worst case over
+200–5000 K. `air.yaml` is NASA7 and is refused rather than accepted as
+approximate. `gamma` and `cp` are deliberately **absent** as attributes: reading
+either as a scalar is the mistake the class exists to prevent, and an
+`AttributeError` at the call site is worth more than a number that is quietly
+20% wrong. That refusal is what drove the migration — it turned "find every
+place that assumes constant `cp`" from a reading exercise into ~95 stack traces.
+
+What made the migration tractable is the *temperature-aware interface* seeded in
+Phase 1: `cp_at(T)`, `gamma_at(T)`, `entropy_ref(T)`,
+`pressure_ratio_isentropic(T1, T2)`, `temperature_isentropic(T1, PR)`. A
+`PerfectGas` ignores the temperature in all of them, so one call site serves both
+gases and the perfect-gas path stays bit-for-bit what it was.
+
+**Then five things were wrong, and the perfect gas hides every one of them.**
+They are worth listing together because they share a shape: each is a place where
+the constant-`cp` expression is not an *approximation* of the general one but a
+*degenerate case* of it, and degenerate cases do not announce themselves.
+
+**(1) `c² = (γ−1)h` in the Roe average.** True only when `h = cp·T`. A NASA9
+enthalpy is referenced to the enthalpy of formation, so on air `h` is **negative**
+below about 300 K — −10,111 J/kg at 288 K — and `(γ−1)h` is a negative "c²".
+`√c²` was NaN in cell 1 on the very first step, so this one at least failed
+loudly. `c² = γ(T)·R·T` is right for any gas.
+
+**(2) The entropy wave's energy eigenvector.** For a general `p(ρ, e)` it is
+`H − c²/κ` with `κ = p_e/ρ = R/cv`, and `c²/κ = cp(T)·T`. The familiar `u²/2` is
+what that *collapses to* on the `h = cp·T` datum, where `H − cp·T = H − h = u²/2`.
+Off that datum it does not collapse, and the gap is not small: on air at 288 K,
+`h − cp·T` is **−299 kJ/kg** against a `u²/2` of about 11 kJ/kg — wrong sign, 27×
+the magnitude. The upwinding then feeds the density-error mode instead of damping
+it. Symptom: a compressor that survived ten steps at −1.2e−03, then died at step
+**96** with a wave that started at the disk and ran upstream, growing, cell 94 →
+cell 52.
+
+The gate for this is `tests/test_realgas_flux.py`, and its form is the point.
+Adding a constant `h₀` to the enthalpy zero is a *gauge* choice — with fixed
+composition and no mass source it shifts `E` by `ρh₀` and the energy flux by
+`(ρu)h₀`, both telescoping against mass conservation — so the numerical energy
+flux must shift by exactly `h₀` times the numerical *mass* flux and nothing else
+may move. That identity is exact, holds on NASA9, and fails on the wrong
+eigenvector. The companion test that runs a *constant-`cp`* gas down the real-gas
+branch and compares against the perfect-gas branch passes either way: with
+`h = cp·T` the wrong expression and the right one coincide. Which is exactly the
+trap, and why both tests are there.
+
+**(3) The inlet characteristic was two different equations.** It formed the
+outgoing invariant as `u − 2c/(γ−1)` with `γ` at the interior static temperature,
+then inverted it through `T = T₀(c/c₀)²` with `γ` at `T₀`. For a perfect gas
+those are the same number and a uniform duct is an exact **fixed point** of the
+condition. For a real gas they are not, the fixed point is lost, and the boundary
+quietly imposes a state at a different Mach from the one the interior carries.
+Measured on a NASA9 compressor: sampled `p₀₁` sat **1.4e−04 below** the imposed
+`p0_in` and `T₀₁` 4.0e−05 below `T0_in`, which moved the operating point by
+**−2.8e−04** in held mass flow. The perfect gas read both back exactly.
+
+The fix keeps the same statement and makes it one equation — freeze `γ` at the
+interior state, pass that same `γ` into the inversion, and solve
+`sign·(u(T_b) − 2c(T_b)/(γ−1)) = J` for `T_b` on the isentrope through `(p₀, T₀)`
+with the real `u` and `c`. Whatever `T_b` comes out, the ghost cell's stagnation
+state is exactly the imposed one for either gas; `T_b` is the single free
+parameter and the characteristic is what fixes it. Measured after, on a plain
+duct with no disk, at four stations:
+
+| gas | `T₀` | `dT₀` | `dp₀` |
+| --- | --- | --- | --- |
+| perfect | 288.15 | 4e−16 | 2e−16 |
+| **nasa9** | 288.15 | **6e−15** | **6e−15** |
+| perfect | 1600 | 4e−16 | 3e−15 |
+| **nasa9** | 1600 | **1e−14** | **7e−15** |
+
+**(4) The disk and the design point read the map differently.** `design.py` takes
+the map's empirical `PR` and `η` to the *actual* `T₀₁` (§3.3's real-gas form);
+the disk scaled the map's corrected work by `θ`. `Δh₀ = CW·θ` is the map's own
+similarity scaling and it is exact only at constant `cp`, because `CW` was derived
+at `T_ref` with that gas's `cp` **there**.
+
+The two agree *identically* at `θ = 1`. A compressor at standard day is `θ = 1`,
+so the entire compressor half of the sweep says nothing about this — which is why
+this one surfaced last. A turbine at 1600 K is `θ = 5.55`, and there the disk was
+imposing one exit state while the duct had been sized for another: **−1.7e−02**
+and **−3.0e−02** held mass flow on the two turbines, against 9e−07 and −1.7e−06
+for the same maps on the perfect gas. (Those two figures were taken with (3) also
+still present, so they are the combined defect; (3) alone is worth ~3e−04, which
+is two orders below, so the split is not in doubt even though it was not measured
+separately.)
+
+All four disk classes carried the same three lines; they now share one
+`_exit_from_point` helper that carries the branch, so this cannot be fixed in
+three places out of four.
+
+**(5) `τ` is not a similarity invariant, and the ECMF key is built out of it.**
+This one only became visible once (4) was fixed — the turbines improved from
+−1.7e−02 to −1.4e−02 and stopped there, which is the signature of a second
+defect of the same size rather than an incomplete fix.
+
+A map's key axis is `ECMF = Wc·√τ/PR`, with `τ` derived **at `T_ref`** because
+that is what "corrected" means. The disk measures `τ = T₀₂/T₀₁` from the field,
+at whatever temperature the machine is running at. For a perfect gas those are
+the same number — that is the entire basis of corrected parameters. For a real
+gas they are not. Measured on `RadialTurbine`, PR 2.524, η 0.804:
+
+| gas | `τ` at 288.15 K | `τ` at 1600 K | shift in the key |
+| --- | --- | --- | --- |
+| perfect | 0.8130598 | 0.8130588 | −6.3e−07 |
+| **nasa9** | **0.8132791** | **0.8416348** | **+1.7e−02** |
+
+A 3.5% gap in `τ`, and the disk was looking up a running-condition key in a table
+built at the reference condition. The fix corrects the measurement back before
+indexing: take `η` from the measured state — `η` is the dimensionless thing the
+map actually tabulates — apply it to the isentrope at `T_ref`, re-derive `τ`
+there. `η` then cancels out of the composition, and with it the
+compressor/turbine branch, leaving one expression (`analytic.reference_tau`).
+
+The cleanest measurement of it needs no marching at all: put the *design state
+itself* through the disk's key expression and ask whether it returns the design
+ECMF. It must, by construction — the duct was sized from that point — so any
+error is the closure disagreeing with the table it indexes.
+
+| gas | case | raw key | corrected key |
+| --- | --- | --- | --- |
+| perfect | `RadialTurbine` | −1.13e−06 | −1.13e−06 |
+| perfect | `TwoStgTurbine` | +1.90e−06 | +1.90e−06 |
+| perfect | `SubsonicCompressor` | +1.71e−07 | +1.71e−07 |
+| **nasa9** | **`RadialTurbine`** | **+1.73e−02** | **−1.76e−06** |
+| **nasa9** | **`TwoStgTurbine`** | **+2.61e−02** | **+6.27e−07** |
+| nasa9 | `SubsonicCompressor` | +2.98e−07 | +2.98e−07 |
+
+Three things worth reading off that table. The correction is **exactly identity**
+on the perfect gas and on a real gas at `θ = 1` — the two rows are the same
+number, not merely close — so nothing already validated moves. The corrected
+real-gas errors land on the same ~1e−06 densify-9 interpolation floor the perfect
+gas sits on, so what is left is the map's resolution rather than its
+thermodynamics. And the raw key errors, **+1.73e−02** and **+2.61e−02**, are the
+same size and the opposite sign as the held mass-flow errors that were actually
+observed on those two turbines, −1.68e−02 and −3.01e−02 — an over-read key moves
+the operating point to lower flow, which closes the loop between cause and
+symptom rather than leaving it inferred.
+
+Worth stating plainly because it generalises past this solver: **§3.3 said the
+dimensionless collapse does not survive NASA9, and this is where that bill comes
+due.** Corrected parameters are a perfect-gas construction. A real-gas map can
+still be *stored* in corrected form — that keeps the table static, which
+`ECMFMap.save` depends on — but every measurement taken off a running machine has
+to be converted into those units rather than compared to them directly.
+
+**Cost.** The first working NASA9 run was **83×** slower than the perfect gas —
+8.8 steps/s against 732 at 201 cells. Almost none of that was the polynomial. The
+profile put **88%** of the step inside `_static_from_stagnation_real` and
+`_state_from_flux_real`, whose scalar root-finds made 138,300 `enthalpy(T)` calls
+per 100 steps, each routed through the vectorised numpy form at **38 µs** for
+eighteen numbers of arithmetic. Three changes, in order of what they bought:
+
+| change | steps/s |
+| --- | --- |
+| first working version | 8.8 |
+| coefficient tables cached instead of rebuilt per call | 11.2 |
+| Illinois regula falsi replacing the 200-step bisections | ~11 |
+| **plain-Python scalar path on `Nasa9Gas`** | **64.2** |
+
+7.3× in total, leaving the real gas **11.5×** the cost of the perfect one. The
+Illinois change is worth keeping — it halves the evaluation *count* and keeps the
+bracket, so the subsonic/supersonic branch cannot be lost — but on its own it
+moved nothing, because the cost was per evaluation and not per iteration. Worth
+recording as a case where the obvious algorithmic improvement was not the
+bottleneck; the profile said so and a guess would not have.
+
 ### 3.44 The forty failures, and what is left after they are sorted
 
 The library sweep of §3.41 leaves 40 failures in 1428 cells. Measuring
@@ -3691,20 +3869,40 @@ under refinement.
   result. With variable area the ~3rd-order stagnation-pressure loss enters and
   the mesh must be fine enough to keep it below tolerance.
 
-### Phase 4 — Real gas (NASA9)
+### Phase 4 — Real gas (NASA9) ✅ complete
+
+Delivered, with the measurements in §3.45:
 
 - NASA 9-coefficient polynomials for `cp°/R`, `H°/RT`, `S°/R` with their
-  temperature intervals.
-- Tabulated `h(T)`, `s°(T)`, `cp(T)` and the inverses `T(h)`, `T(s°)` on a
-  temperature grid, so every runtime inversion becomes an interpolation rather
-  than a Newton solve.
-- Consistent real-gas Roe average (Vinokur–Montagné or Glaister).
-- Reformulated characteristic BCs (the `2c/(γ−1)` invariant does not survive).
-- `cons_to_prim` via `e(T) = h(T) − RT` inversion — the dominant new cost.
+  temperature intervals. Read from Cantera's `airNASA9.yaml` at construction,
+  evaluated here, checked against Cantera to 1.6e−09 over 200–5000 K.
+- ~~Tabulated `h(T)`, `s°(T)`, `cp(T)` and the inverses on a temperature grid~~
+  — **not needed.** The plan assumed the polynomial was the cost. It is not:
+  direct evaluation with a plain-Python scalar path plus a cached coefficient
+  table gets the real gas to 11.5× the perfect-gas step, and a table would add
+  its own interpolation error to a quantity the maps are keyed on. Revisit only
+  if a profile says so.
+- Consistent real-gas Roe average. Equivalent-γ at the Roe-averaged state, with
+  **both** `c² = γ(T)RT` and the general entropy-wave eigenvector `H − c²/κ`
+  (§3.45 (1) and (2)); the second is the one that is easy to miss and it is fatal.
+- Reformulated characteristic BCs. The `2c/(γ−1)` invariant indeed does not
+  survive — but the fix that mattered was not a better invariant, it was making
+  the two halves of the condition use *the same frozen γ* so a uniform duct
+  stays a fixed point (§3.45 (3)).
+- `cons_to_prim` via `e(T) = h(T) − RT` inversion, vectorised and warm-started
+  from the previous step's temperature. Not the dominant new cost — the scalar
+  root-finds in `analytic.py` were, by an order of magnitude.
 
-**Gate:** real-gas 0D ↔ Q1D match at the Phase 3 tolerance, **and** exact
-recovery of the Phase 3 ideal-gas results when NASA9 is replaced by constant
-cp — a regression on the entire thermodynamic layer.
+Also required, and not anticipated here: **the disk and the design point had to
+be made to read a map the same way** (§3.45 (4)). `Δh₀ = CW·θ` is a constant-`cp`
+identity, and a turbine at `θ = 5.55` is where that stops being a rounding
+difference.
+
+**Gate:** met. Exact recovery of the perfect-gas path is structural — every
+changed site branches on whether the gas advertises a constant `γ`, and the
+perfect-gas branch is bit-identical — and is asserted directly in
+`tests/test_realgas_flux.py` (real-gas branch reproduces the perfect-gas Roe flux
+on a constant-`cp` gas) and `tests/test_nasa9_endtoend.py`.
 
 ### Phase 5 — Real compressor maps
 

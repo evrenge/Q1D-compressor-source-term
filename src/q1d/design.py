@@ -32,7 +32,6 @@ from .analytic import (
     _is_calorically_perfect,
     exit_stagnation_from_map,
     flow_function_at,
-    max_flow_function,
     max_flow_function_at,
     static_from_stagnation,
 )
@@ -190,8 +189,6 @@ def design_from_map(
             f"running one from a standard-day inlet asks it for more enthalpy than "
             f"the flow has"
         )
-
-    from .analytic import flow_function
 
     phi1 = flow_function_at(inlet_mach, gas, T01)
     phi_max = max_flow_function_at(gas, T01)

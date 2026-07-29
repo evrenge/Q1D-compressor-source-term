@@ -29,8 +29,10 @@ import numpy as np
 from .analytic import (
     add_stagnation_enthalpy,
     compressor_source_terms,
+    exit_stagnation_from_map,
     flow_function,
     max_flow_function,
+    reference_tau,
     stagnation_from_static,
 )
 from .gas import PerfectGas
@@ -250,6 +252,51 @@ def _exit_p0(PR: float, p01: float, kind: str) -> float:
     once — dimensionally fine, physically impossible, and silent.
     """
     return p01 / PR if kind == "turbine" else PR * p01
+
+
+def _reference_tau(T01: float, T02: float, pr: float, measured: float, gas) -> float:
+    """``τ`` in the units the map's key axis is built in.
+
+    For a calorically perfect gas the measured ``T₀₂/T₀₁`` already *is* that —
+    ``τ`` is a similarity invariant — and is returned untouched so the
+    perfect-gas key is bit-identical to what it always was. For a real gas it is
+    not an invariant and the measurement has to be corrected back to ``T_ref``
+    before it can index a table built there; see
+    :func:`~q1d.analytic.reference_tau` for the size of the gap and the algebra.
+    """
+    if hasattr(gas, "cp"):
+        return measured
+    from .maps import T_REF
+
+    return reference_tau(T01, T02, pr, gas, T_REF)
+
+
+def _exit_from_point(point, T01: float, p01: float, theta: float, gas, kind: str):
+    """``(T₀₂, p₀₂, Δh₀)`` the disk should impose, from a map point.
+
+    One helper because all four disk classes need exactly this and had exactly
+    this, three lines at a time — and because the two gases must take *different*
+    routes to it, which is the kind of thing that gets fixed in three places out
+    of four.
+
+    **Calorically perfect:** ``Δh₀ = CW·θ``. The corrected-work field is the
+    map's own similarity scaling and this reproduces it exactly.
+
+    **Real gas:** ``CW·θ`` is no longer the right scaling, because ``CW`` was
+    derived at ``T_ref`` with that gas's ``cp`` *there* and ``θ`` cannot carry it
+    to a different temperature when ``cp`` moves. Take the map's empirical ``PR``
+    and ``η`` to the actual ``T₀₁`` instead (:func:`exit_stagnation_from_map`).
+
+    The two agree identically at ``θ = 1``, which is why a NASA9 *compressor* at
+    standard day showed nothing. A turbine does not run at ``θ = 1``: at 1600 K
+    inlet ``θ`` is 5.55, and there the two disagree by tens of kelvin — with
+    ``design.py`` already on the second route, so the disk and the design point
+    were solving different machines.
+    """
+    if hasattr(gas, "cp"):
+        dh0 = point.corrected_work * theta
+        return add_stagnation_enthalpy(T01, dh0, gas), _exit_p0(point.PR, p01, kind), dh0
+    return exit_stagnation_from_map(T01, p01, point.PR, point.efficiency, gas, kind)
 
 
 def _map_kind(m: object) -> str:
@@ -865,9 +912,9 @@ class InletFlowCompressor:
         Wc = W * math.sqrt(theta) / delta
         point = self.beta_map.evaluate_at_Wc(Wc, self.corrected_speed)
 
-        dh0 = point.corrected_work * theta
-        T02 = add_stagnation_enthalpy(T01, dh0, gas)
-        p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
+        T02, p02, dh0 = _exit_from_point(
+            point, T01, p01, theta, gas, _map_kind(self.beta_map)
+        )
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
@@ -1056,9 +1103,9 @@ class UnsteadyMappedCompressor:
 
         point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
 
-        dh0 = point.corrected_work * theta
-        T02 = add_stagnation_enthalpy(T01, dh0, gas)
-        p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
+        T02, p02, dh0 = _exit_from_point(
+            point, T01, p01, theta, gas, _map_kind(self.beta_map)
+        )
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
@@ -1297,6 +1344,7 @@ class FlowMatchedCompressor:
         pr, tau = p02 / p01, t02 / T01
         if pr <= 0.0 or tau <= 0.0:
             return math.nan
+        tau = _reference_tau(T01, t02, pr, tau, gas)
         return (w * math.sqrt(theta) / delta) * math.sqrt(tau) / pr
 
     def __call__(self, solver: Solver) -> np.ndarray:
@@ -1390,9 +1438,9 @@ class FlowMatchedCompressor:
                 self._beta = min(1.0, max(0.0, nb))
 
         point = self.beta_map.evaluate_at_beta(self._beta, self.corrected_speed)
-        dh0 = point.corrected_work * theta
-        T02 = add_stagnation_enthalpy(T01, dh0, gas)
-        p02 = _exit_p0(point.PR, p01, _map_kind(self.beta_map))
+        T02, p02, dh0 = _exit_from_point(
+            point, T01, p01, theta, gas, _map_kind(self.beta_map)
+        )
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)
@@ -1662,6 +1710,7 @@ class EcmfCompressor:
         pr, tau = p02 / p01, t02 / T01
         if pr <= 0.0 or tau <= 0.0:
             return math.nan
+        tau = _reference_tau(T01, t02, pr, tau, gas)
         # One expression for both machines. `pr` here is the *measured*
         # p02/p01, not the map's PR, and the two conventions differ only in
         # which way up they store that ratio -- so `Wc·√τ/pr` is ECMF for a
@@ -1730,9 +1779,9 @@ class EcmfCompressor:
                 self._off_table += self._map_off_table() - before
 
         point = self._point
-        dh0 = point.corrected_work * theta
-        T02 = add_stagnation_enthalpy(T01, dh0, gas)
-        p02 = _exit_p0(point.PR, p01, _map_kind(self.ecmf_map))
+        T02, p02, dh0 = _exit_from_point(
+            point, T01, p01, theta, gas, _map_kind(self.ecmf_map)
+        )
 
         st1 = static_from_stagnation(T01, p01, W, area, gas)
         st2 = static_from_stagnation(T02, p02, W, area, gas)

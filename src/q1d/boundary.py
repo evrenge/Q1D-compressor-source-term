@@ -72,27 +72,37 @@ class StagnationInletStaticOutlet:
     p_static_in: float | None = None
 
     def _subsonic_inflow(
-        self, riemann: float, p0: float, T0: float, sign: float, gas: PerfectGas
+        self, riemann: float, p0: float, T0: float, sign: float, gas: PerfectGas, gm1: float
     ) -> GhostState:
-        """Solve the inflow quadratic for the boundary sound speed.
+        """Solve the inflow condition for the boundary state.
 
         ``riemann`` is the invariant running *out* of the domain:
         ``u - 2c/(gamma-1)`` at the left, ``u + 2c/(gamma-1)`` at the right.
         ``sign`` is +1 when the inflow runs in +x (left boundary), -1 at the
-        right.
+        right. ``gm1`` is the ``gamma - 1`` **the caller used to form**
+        ``riemann``; passing it in rather than re-deriving it is what makes the
+        two halves of the condition the same equation (see below).
+
+        Whatever ``T_b`` comes out, the ghost state is exactly on the isentrope
+        through ``(p0, T0)`` and exactly satisfies ``h(T0) = h(T_b) + u_b^2/2``,
+        so its *stagnation* state is the imposed one to round-off for either
+        gas. ``T_b`` is the one free parameter, and the outgoing characteristic
+        is what fixes it.
         """
-        g, gm1, gp1 = _gamma_local(gas, T0)
-        c0_sq = g * gas.R * T0
-        disc = -0.5 * gm1 + gp1 * c0_sq / (gm1 * riemann * riemann)
-        if disc < 0.0:
-            # The imposed stagnation state cannot sustain the outgoing
-            # invariant. Clamping hides this; fall back to the stagnation
-            # state itself, which is the physically closest admissible state.
-            cb = math.sqrt(c0_sq)
+        if hasattr(gas, "gamma"):
+            g, gp1 = gas.gamma, gas.gp1
+            c0_sq = g * gas.R * T0
+            disc = -0.5 * gm1 + gp1 * c0_sq / (gm1 * riemann * riemann)
+            if disc < 0.0:
+                # The imposed stagnation state cannot sustain the outgoing
+                # invariant. Clamping hides this; fall back to the stagnation
+                # state itself, which is the physically closest admissible state.
+                cb = math.sqrt(c0_sq)
+            else:
+                cb = abs(riemann) * gm1 / gp1 * (1.0 + math.sqrt(disc))
+            Tb = min(T0 * cb * cb / c0_sq, T0)  # guard round-off above stagnation
         else:
-            cb = abs(riemann) * gm1 / gp1 * (1.0 + math.sqrt(disc))
-        Tb = T0 * cb * cb / c0_sq
-        Tb = min(Tb, T0)  # guard round-off above stagnation
+            Tb = _real_inflow_temperature(riemann, T0, sign, gas, gm1)
         pb = p0 * gas.pressure_ratio_isentropic(T0, Tb)
         rhob = pb / (gas.R * Tb)
         ub = sign * math.sqrt(max(0.0, 2.0 * (gas.enthalpy(T0) - gas.enthalpy(Tb))))
@@ -100,7 +110,8 @@ class StagnationInletStaticOutlet:
 
     @staticmethod
     def _subsonic_outflow(
-        rho: float, p: float, riemann: float, p_imposed: float, sign: float, gas: PerfectGas
+        rho: float, p: float, riemann: float, p_imposed: float, sign: float,
+        gas: PerfectGas, gm1: float
     ) -> GhostState:
         """Impose static pressure, extrapolate entropy, close with the invariant.
 
@@ -108,14 +119,31 @@ class StagnationInletStaticOutlet:
         ``J- = u - 2c/(gamma-1)`` and so ``u_b = J- + 2c_b/(gamma-1)``; and -1
         at the right, where ``J+ = u + 2c/(gamma-1)`` gives
         ``u_b = J+ - 2c_b/(gamma-1)``.
+
+        ``gm1`` again comes from the caller, for the same reason.
         """
-        g, gm1, _ = _gamma_local(gas, p / (rho * gas.R))
-        rhob = rho * (p_imposed / p) ** (1.0 / g)
-        cb = math.sqrt(g * p_imposed / rhob)
+        T = p / (rho * gas.R)
+        if hasattr(gas, "gamma"):
+            rhob = rho * (p_imposed / p) ** (1.0 / gas.gamma)
+            cb = math.sqrt(gas.gamma * p_imposed / rhob)
+        else:
+            # The constant-gamma `rho (p/p_ref)^(1/gamma)` is the power-law
+            # isentrope; take the real one through the same interior state.
+            Tb = gas.temperature_isentropic(T, p_imposed / p)
+            rhob = p_imposed / (gas.R * Tb)
+            cb = math.sqrt(gas.gamma_at(Tb) * gas.R * Tb)
         ub = riemann + sign * 2.0 * cb / gm1
         return GhostState(rhob, ub, p_imposed)
 
     def left(self, rho: float, u: float, p: float, c: float, gas: PerfectGas) -> GhostState:
+        # gamma frozen at the state whose characteristic this is -- the interior
+        # cell's. Not at T0: a uniform duct is then no longer a fixed point of
+        # the condition, because the invariant would be formed with one gamma
+        # and inverted with another. Measured on a NASA9 compressor, that
+        # mismatch left the sampled inlet p01 1.4e-04 BELOW the imposed p0_in
+        # and moved the operating point by 2.8e-04 in mass flow (PLAN.md §3.45).
+        # Identical for a perfect gas, where the two gammas are the same number.
+        gm1 = _gamma_local(gas, p / (rho * gas.R))[1]
         if u >= 0.0:  # inflow
             if u >= c:
                 # Supersonic inflow: all three characteristics enter, so the
@@ -138,25 +166,71 @@ class StagnationInletStaticOutlet:
                         "must itself be supersonic"
                     )
                 return GhostState(pb / (gas.R * Tb), ub, pb)
-            gm1 = _gamma_local(gas, self.T0_in)[1]
-            return self._subsonic_inflow(u - 2.0 * c / gm1, self.p0_in, self.T0_in, +1.0, gas)
+            return self._subsonic_inflow(
+                u - 2.0 * c / gm1, self.p0_in, self.T0_in, +1.0, gas, gm1
+            )
         if -u < c:  # subsonic outflow through the inlet (reverse flow)
-            gm1 = _gamma_local(gas, p / (rho * gas.R))[1]
-            return self._subsonic_outflow(rho, p, u - 2.0 * c / gm1, self.p_back, +1.0, gas)
+            return self._subsonic_outflow(
+                rho, p, u - 2.0 * c / gm1, self.p_back, +1.0, gas, gm1
+            )
         return GhostState(rho, u, p)  # supersonic outflow: extrapolate
 
     def right(self, rho: float, u: float, p: float, c: float, gas: PerfectGas) -> GhostState:
+        gm1 = _gamma_local(gas, p / (rho * gas.R))[1]
         if u < 0.0:  # inflow through the outlet (reverse flow)
             p0 = self.p0_back if self.p0_back is not None else self.p0_in
             T0 = self.T0_back if self.T0_back is not None else self.T0_in
             if -u >= c:
                 return GhostState(rho, u, p)
-            gm1 = _gamma_local(gas, T0)[1]
-            return self._subsonic_inflow(u + 2.0 * c / gm1, p0, T0, -1.0, gas)
+            return self._subsonic_inflow(u + 2.0 * c / gm1, p0, T0, -1.0, gas, gm1)
         if u < c:  # subsonic outflow: impose the back pressure
-            gm1 = _gamma_local(gas, p / (rho * gas.R))[1]
-            return self._subsonic_outflow(rho, p, u + 2.0 * c / gm1, self.p_back, -1.0, gas)
+            return self._subsonic_outflow(
+                rho, p, u + 2.0 * c / gm1, self.p_back, -1.0, gas, gm1
+            )
         return GhostState(rho, u, p)  # supersonic outflow: extrapolate
+
+
+def _real_inflow_temperature(
+    riemann: float, T0: float, sign: float, gas, gm1: float
+) -> float:
+    """``T_b`` on the isentrope through ``T0`` that carries the given invariant.
+
+    The perfect-gas branch closes in one quadratic because ``T = T0 (c/c0)^2``
+    and ``u = 2(c0 - c)/(gamma-1)`` are both explicit. Neither survives variable
+    ``cp``, so solve the same statement directly:
+
+    .. math::
+
+        \\mathrm{sign}\\left(u(T_b) - \\frac{2c(T_b)}{\\gamma-1}\\right)
+            = \\text{riemann},\\quad
+        u(T_b) = \\sqrt{2(h(T_0) - h(T_b))},\\;
+        c(T_b) = \\sqrt{\\gamma(T_b) R T_b}
+
+    As ``T_b`` falls from ``T0`` the velocity rises from zero and the sound speed
+    falls, so the left side is monotone and the root is unique on the subsonic
+    bracket ``[T*, T0]``. Because ``u`` and ``c`` here are the *real* ones and
+    ``gamma-1`` is the same frozen value the caller used to form ``riemann``, an
+    interior state already at the imposed stagnation condition reproduces itself
+    exactly — which is the property the perfect-gas branch has and the reason
+    this exists.
+    """
+    from .analytic import _bracketed_root, _sonic_temperature
+
+    h0 = gas.enthalpy(T0)
+
+    def leaving(T: float) -> float:
+        u = math.sqrt(max(0.0, 2.0 * (h0 - gas.enthalpy(T))))
+        return sign * (u - 2.0 * math.sqrt(gas.gamma_at(T) * gas.R * T) / gm1) - riemann
+
+    lo = _sonic_temperature(T0, gas)
+    hi = T0 * (1.0 - 1e-15)
+    f_lo, f_hi = leaving(lo), leaving(hi)
+    if f_lo * f_hi > 0.0:
+        # No subsonic state on this isentrope carries the invariant -- the
+        # perfect-gas branch's negative discriminant, in the general form. Fall
+        # back to the stagnation state, the closest admissible one.
+        return T0
+    return _bracketed_root(leaving, lo, hi, f_lo, f_hi, tol=1e-14 * T0)
 
 
 def _gamma_local(gas, T: float) -> tuple[float, float, float]:

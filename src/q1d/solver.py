@@ -127,20 +127,23 @@ def _temperature_from_enthalpy_arr(gas, h, hint=None):
     return T
 
 
-def _pressure_real(gas, cv: np.ndarray, a: np.ndarray, hint=None) -> np.ndarray:
-    """``p`` from the conserved variables when ``cp`` is not constant.
+def _pressure_real(gas, cv: np.ndarray, a: np.ndarray, hint=None):
+    """``(p, T)`` from the conserved variables when ``cp`` is not constant.
 
     ``e = E/rho - u^2/2`` is internal energy; for any gas ``e = h(T) - R*T``, so
     ``T`` follows by inverting that and ``p = rho*R*T``. The inversion is a
     vectorised Newton, warm-started from the previous step's temperature when
     one is available -- during a converging run that start is within a few
     kelvin and the Newton takes two or three iterations rather than twenty.
+    ``T`` comes back so the caller can keep it for that warm start; throwing it
+    away and re-deriving ``p/(rho*R)`` costs nothing but leaves the next Newton
+    cold.
     """
     rho = cv[0] / a
     u = cv[1] / cv[0]
     e = cv[2] / (rho * a) - 0.5 * u * u
     T = _temperature_from_internal(gas, e, hint)
-    return rho * gas.R * T
+    return rho * gas.R * T, T
 
 
 def _temperature_from_internal(gas, e: np.ndarray, hint=None) -> np.ndarray:
@@ -297,9 +300,10 @@ class Solver:
                 self.gas.gm1 / a * (cv[2, 1:-1] - 0.5 * cv[1, 1:-1] * cv[1, 1:-1] / cv[0, 1:-1])
             )
         else:
-            self.p[1:-1] = _pressure_real(
-                self.gas, cv[:, 1:-1], a, getattr(self, "_T_hint", None)
-            )
+            # No hint: the interior slice has a different shape from the whole
+            # array the hint is kept at, and at setup there is nothing to hint
+            # with anyway.
+            self.p[1:-1], _ = _pressure_real(self.gas, cv[:, 1:-1], a)
         self._sync_boundaries()
 
     def primitives(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -320,7 +324,7 @@ class Solver:
                 out=self.p,
             )
         else:
-            self.p[:] = _pressure_real(self.gas, cv, a, getattr(self, "_T_hint", None))
+            self.p[:], self._T_hint = _pressure_real(self.gas, cv, a, self._T_hint)
         # min() returns NaN if any element is NaN, so `not (m > 0)` catches
         # non-positive and non-finite in one reduction per array.
         if not (self.p.min() > 0.0 and cv[0].min() > 0.0):
@@ -394,16 +398,34 @@ class Solver:
         q2a = 0.5 * uav * uav
         if perfect:
             c2a = gas.gm1 * (hav - q2a)
+            # Energy component of the entropy-wave eigenvector. See below.
+            e2a = q2a
         else:
-            # Equivalent-gamma Roe. The eigenstructure is derived assuming a
-            # constant gamma; the standard real-gas treatment keeps it and
-            # evaluates gamma at the Roe-averaged state, which is exact where
-            # the two sides agree and consistent in the limit of small jumps.
+            # Real-gas Roe with the eigenstructure of a general p(rho, e), not
+            # the constant-gamma one with gamma swapped for a local value. Two
+            # things change and BOTH are needed; carrying only the first is what
+            # blew a compressor up at step 96 with an upstream-running wave.
+            #
             # `hav - q2a` is the averaged STATIC enthalpy, so it inverts for the
             # averaged temperature directly.
             Tav = _temperature_from_enthalpy_arr(gas, hav - q2a, self._roe_T_hint)
             self._roe_T_hint = Tav
-            c2a = (gas.gamma_at(Tav) - 1.0) * (hav - q2a)
+            # (1) c^2 = gamma*R*T, NOT (gamma-1)*h. The two agree only when
+            # h = cp*T. A NASA9 enthalpy carries the enthalpy of formation, so h
+            # is NEGATIVE below about 300 K on air (-10,111 J/kg at 288 K) and
+            # (gamma-1)*h would be a negative "c^2" -- the square root of which
+            # is how this first appeared: NaN in cell 1 on the very first step.
+            c2a = gas.gamma_at(Tav) * gas.R * Tav
+            # (2) The entropy wave's energy eigenvector is `H - c^2/kappa` with
+            # kappa = p_e/rho = R/cv, not `u^2/2`. The familiar `u^2/2` is what
+            # that expression *collapses to* when h = cp*T: c^2/kappa = cp*T = h,
+            # so H - h = u^2/2. Off that datum it does not collapse, and the gap
+            # is not small -- on air at 288 K, h - cp*T is -299 kJ/kg against a
+            # u^2/2 of about 11 kJ/kg, so the entropy wave's contribution to the
+            # energy flux comes out with the wrong sign and 27x the magnitude.
+            # The upwinding then feeds the density-error mode instead of damping
+            # it, which is exactly the growing wave that was observed.
+            e2a = hav - gas.cp_at(Tav) * Tav
         cav = np.sqrt(c2a)
 
         # One stacked Harten correction rather than three separate calls.
@@ -420,7 +442,7 @@ class Solver:
             [
                 a2 + a3 + a5,
                 a2 * (uav - cav) + a3 * uav + a5 * (uav + cav),
-                a2 * (hav - cav * uav) + a3 * q2a + a5 * (hav + cav * uav),
+                a2 * (hav - cav * uav) + a3 * e2a + a5 * (hav + cav * uav),
             ]
         )
         return 0.5 * (central - dissipation) * self.grid.a_face

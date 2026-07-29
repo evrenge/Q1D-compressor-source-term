@@ -481,6 +481,63 @@ class ScaledMap:
         return self.inner.inlet_closure_is_invertible(corrected_speed)
 
 
+def _describe_gas(gas) -> str:
+    """A short, comparable description of a gas, for error messages."""
+    if hasattr(gas, "gamma"):
+        return f"gamma={gas.gamma!r}, cp={gas.cp!r}"
+    return f"{type(gas).__name__}({getattr(gas, 'name', '')!r}, R={gas.R!r})"
+
+
+def _same_gas(a, b) -> bool:
+    """Whether two gases would derive the same ``corrected_work`` and ``ecmf``.
+
+    Compared on the numbers that actually enter those derivations rather than on
+    identity or name: two ``Nasa9Gas`` instances built from the same mechanism and
+    composition are different objects with identical coefficients, and refusing
+    that would make :meth:`ECMFMap.load` unusable.
+    """
+    perfect_a, perfect_b = hasattr(a, "gamma"), hasattr(b, "gamma")
+    if perfect_a != perfect_b:
+        return False
+    if perfect_a:
+        return a.gamma == b.gamma and a.cp == b.cp
+    return (
+        a.R == b.R
+        and a.weights == b.weights
+        and a.regions == b.regions
+    )
+
+
+def _gas_from_npz(z) -> object:
+    """Rebuild the gas a saved table was derived with.
+
+    A real gas is reconstructed from its stored NASA9 blocks, not from its name,
+    so loading a table never needs Cantera and never depends on a mechanism file
+    still being present or unchanged.
+    """
+    if str(z["gas_kind"]) != "Nasa9Gas":
+        return PerfectGas(float(z["gamma"]), float(z["cp"]))
+    from .gas import Nasa9Gas
+
+    blocks = np.asarray(z["gas_blocks"], dtype=float)
+    counts = np.asarray(z["gas_region_counts"], dtype=int)
+    regions, at = [], 0
+    for n in counts:
+        species = []
+        for row in blocks[at : at + n]:
+            species.append((float(row[0]), float(row[1]),
+                            tuple(float(v) for v in row[2:9]),
+                            float(row[9]), float(row[10])))
+        regions.append(tuple(species))
+        at += n
+    return Nasa9Gas(
+        regions=tuple(regions),
+        weights=tuple(float(w) for w in z["gas_weights"]),
+        R=float(z["gas_R"]),
+        name=str(z["gas_repr"]),
+    )
+
+
 @dataclass(frozen=True)
 class ECMFMap:
     """A map keyed on **ECMF**, with β eliminated at build time.
@@ -679,12 +736,32 @@ class ECMFMap:
         pays that per case, for nothing.
 
         Stored: the key and value grids, the speed axis, ``key_field``, ``kind``,
-        and the gas ``gamma``/``cp`` the table was derived with. The gas matters
+        and **the gas itself** — ``gamma``/``cp`` for a perfect gas, the NASA9
+        coefficient blocks and mixture weights for a real one. The gas matters
         because ``corrected_work`` and ``ecmf`` were computed from it — loading a
         table against a different gas would be silently wrong, so :meth:`load`
         checks rather than trusts.
+
+        Carrying the NASA9 blocks rather than a name is what makes the check
+        possible without importing Cantera at load time, and it is not optional:
+        an earlier version stored ``gamma``/``cp`` only, so a real-gas table came
+        back as a ``PerfectGas(nan, nan)`` — the exact silent substitution the
+        checking is for.
         """
         path = Path(path)
+        extra = {}
+        if hasattr(self.gas, "regions"):  # Nasa9Gas
+            blocks, counts = [], []
+            for species in self.gas.regions:
+                counts.append(len(species))
+                for lo, hi, a, b1, b2 in species:
+                    blocks.append([lo, hi, *a, b1, b2])
+            extra = {
+                "gas_R": np.array(self.gas.R),
+                "gas_weights": np.asarray(self.gas.weights, dtype=float),
+                "gas_region_counts": np.asarray(counts, dtype=np.int64),
+                "gas_blocks": np.asarray(blocks, dtype=float),
+            }
         # Uncompressed on purpose: `savez_compressed` costs more CPU than it
         # saves I/O here. Measured on `SubsonicCompressor` at densify 36 --
         # 0.058 s to load compressed against 0.009 s raw, and on the largest
@@ -704,6 +781,7 @@ class ECMFMap:
             gas_repr=np.array(getattr(self.gas, "name", "")),
             gamma=np.array(getattr(self.gas, "gamma", float("nan"))),
             cp=np.array(getattr(self.gas, "cp", float("nan"))),
+            **extra,
         )
         return path if path.suffix else path.with_suffix(".npz")
 
@@ -716,14 +794,12 @@ class ECMFMap:
         ``corrected_work`` and ``ecmf`` already carry that gas's constants.
         """
         with np.load(Path(path), allow_pickle=False) as z:
-            stored = PerfectGas(float(z["gamma"]), float(z["cp"]))
-            if gas is not None and (
-                gas.gamma != stored.gamma or gas.cp != stored.cp
-            ):
+            stored = _gas_from_npz(z)
+            if gas is not None and not _same_gas(gas, stored):
                 raise ValueError(
-                    f"{path} was built with gamma={stored.gamma!r}, cp={stored.cp!r}; "
-                    f"asked to load it as gamma={gas.gamma!r}, cp={gas.cp!r}. The stored "
-                    f"corrected work and ECMF already carry the first pair"
+                    f"{path} was built with {_describe_gas(stored)}; asked to load it "
+                    f"as {_describe_gas(gas)}. The stored corrected work and ECMF "
+                    f"already carry the first"
                 )
             # Column-major on the way back in, for the same reason `from_beta_map`
             # builds it that way: `evaluate` slices columns (§3.37).
@@ -796,7 +872,16 @@ class ECMFMap:
         # (§3.6), and a slope taken next to a pole is not a slope.
         ef = (at(j, self.efficiency, extrapolate=False) * (1.0 - w)
               + at(j + 1, self.efficiency, extrapolate=False) * w)
-        tau = 1.0 + cw / (self.gas.cp * T_REF)
+        # τ at the REFERENCE condition, which is where corrected quantities are
+        # defined -- this is the map's own bookkeeping, not the running machine's
+        # temperature. For a real gas it is h⁻¹(h(T_ref) + CW)/T_ref rather than
+        # 1 + CW/(cp·T_ref).
+        if hasattr(self.gas, "cp"):
+            tau = 1.0 + cw / (self.gas.cp * T_REF)
+        else:
+            tau = self.gas.temperature_from_enthalpy(
+                self.gas.enthalpy(T_REF) + cw, guess=T_REF
+            ) / T_REF
         lo = float(min(self.key[0, j], self.key[0, j + 1]))
         hi = float(max(self.key[-1, j], self.key[-1, j + 1]))
         e = float(np.clip(ecmf, lo, hi))

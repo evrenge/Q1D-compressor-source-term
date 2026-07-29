@@ -9,8 +9,12 @@ is a constructor change rather than a rewrite.
 
 from __future__ import annotations
 
+import bisect
+import functools
 import math
 from dataclasses import dataclass
+
+import numpy as np
 
 __all__ = ["PerfectGas", "Nasa9Gas", "AIR_LEGACY"]
 
@@ -221,6 +225,42 @@ class Nasa9Gas:
             name=name or f"{mechanism}:{'/'.join(f'{k}={v:.4g}' for k, v in X.items())}",
         )
 
+    @functools.cached_property
+    def _tables(self):
+        """``(upper edges, coefficient rows)`` per species, built once.
+
+        ``_coeffs`` used to rebuild both arrays from Python lists on every call,
+        and it is called several times per Newton iteration per bisection step.
+        Profiling a NASA9 compressor run put 933,165 calls in 100 time steps,
+        with the array construction — not the polynomial — as the cost
+        (``PLAN.md`` §3.45). Cached on a frozen dataclass, which works because
+        ``cached_property`` writes straight into ``__dict__`` rather than
+        through ``__setattr__``.
+        """
+        out = []
+        for blocks in self.regions:
+            edges = np.array([b[1] for b in blocks[:-1]])
+            table = np.array([[*b[2], b[3], b[4]] for b in blocks])
+            out.append((edges, table))
+        return tuple(out)
+
+    @functools.cached_property
+    def _scalar_tables(self):
+        """The same rows as :attr:`_tables`, as plain Python floats.
+
+        For the scalar path. Numpy's per-call overhead is what dominates a
+        single-temperature evaluation: routed through the vectorised form, one
+        ``enthalpy(T)`` on a float cost **38 µs**, essentially all of it numpy
+        dispatch on 18 numbers of arithmetic. The root-finds in ``analytic.py``
+        are all scalar and made 138,300 such calls per 100 solver steps, which
+        is how a NASA9 run came to be 83x slower than the perfect-gas one
+        (``PLAN.md`` §3.45).
+        """
+        return tuple(
+            ([b[1] for b in blocks[:-1]], [(*b[2], b[3], b[4]) for b in blocks])
+            for blocks in self.regions
+        )
+
     def _coeffs(self, T):
         """Per-species coefficient rows selected for ``T``, scalar or array.
 
@@ -229,18 +269,25 @@ class Nasa9Gas:
         unusable rather than merely slower: the perfect-gas step already costs
         1512 µs at 201 cells (``PLAN.md`` §3.41).
         """
-        import numpy as np
-
         Ta = np.asarray(T, dtype=float)
-        for blocks in self.regions:
-            edges = np.array([b[1] for b in blocks[:-1]])
-            idx = np.searchsorted(edges, Ta, side="left")
-            table = np.array([[*b[2], b[3], b[4]] for b in blocks])
-            yield table[idx]
+        for edges, table in self._tables:
+            yield table[np.searchsorted(edges, Ta, side="left")]
+
+    def _scalar_rows(self, t: float):
+        """``(row, weight)`` per species at one temperature, no numpy."""
+        for (edges, rows), w in zip(self._scalar_tables, self.weights, strict=True):
+            yield rows[bisect.bisect_left(edges, t)], w
 
     def cp_at(self, T):
-        import numpy as np
-
+        if np.ndim(T) == 0:
+            t = float(T)
+            out = 0.0
+            for a, w in self._scalar_rows(t):
+                out += w * (
+                    a[0] / t**2 + a[1] / t + a[2] + a[3] * t
+                    + a[4] * t**2 + a[5] * t**3 + a[6] * t**4
+                )
+            return out
         Ta = np.asarray(T, dtype=float)
         out = np.zeros_like(Ta)
         for c, w in zip(self._coeffs(Ta), self.weights, strict=True):
@@ -249,11 +296,19 @@ class Nasa9Gas:
                 a[0] / Ta**2 + a[1] / Ta + a[2] + a[3] * Ta
                 + a[4] * Ta**2 + a[5] * Ta**3 + a[6] * Ta**4
             )
-        return float(out) if np.ndim(T) == 0 else out
+        return out
 
     def enthalpy(self, T):
-        import numpy as np
-
+        if np.ndim(T) == 0:
+            t = float(T)
+            lnt = math.log(t)
+            out = 0.0
+            for a, w in self._scalar_rows(t):
+                out += w * t * (
+                    -a[0] / t**2 + a[1] * lnt / t + a[2] + a[3] * t / 2.0
+                    + a[4] * t**2 / 3.0 + a[5] * t**3 / 4.0 + a[6] * t**4 / 5.0 + a[7] / t
+                )
+            return out
         Ta = np.asarray(T, dtype=float)
         lnT = np.log(Ta)
         out = np.zeros_like(Ta)
@@ -264,11 +319,19 @@ class Nasa9Gas:
                 -a[0] / Ta**2 + a[1] * lnT / Ta + a[2] + a[3] * Ta / 2.0
                 + a[4] * Ta**2 / 3.0 + a[5] * Ta**3 / 4.0 + a[6] * Ta**4 / 5.0 + b1 / Ta
             )
-        return float(out) if np.ndim(T) == 0 else out
+        return out
 
     def entropy_ref(self, T):
-        import numpy as np
-
+        if np.ndim(T) == 0:
+            t = float(T)
+            lnt = math.log(t)
+            out = 0.0
+            for a, w in self._scalar_rows(t):
+                out += w * (
+                    -a[0] / (2.0 * t**2) - a[1] / t + a[2] * lnt + a[3] * t
+                    + a[4] * t**2 / 2.0 + a[5] * t**3 / 3.0 + a[6] * t**4 / 4.0 + a[8]
+                )
+            return out
         Ta = np.asarray(T, dtype=float)
         lnT = np.log(Ta)
         out = np.zeros_like(Ta)
@@ -279,22 +342,19 @@ class Nasa9Gas:
                 -a[0] / (2.0 * Ta**2) - a[1] / Ta + a[2] * lnT + a[3] * Ta
                 + a[4] * Ta**2 / 2.0 + a[5] * Ta**3 / 3.0 + a[6] * Ta**4 / 4.0 + b2
             )
-        return float(out) if np.ndim(T) == 0 else out
+        return out
 
     def gamma_at(self, T):
         cp = self.cp_at(T)
         return cp / (cp - self.R)
 
     def speed_of_sound(self, T):
-        import numpy as np
-
-        return np.sqrt(self.gamma_at(T) * self.R * np.asarray(T, dtype=float)) \
-            if np.ndim(T) else (self.gamma_at(T) * self.R * T) ** 0.5
+        if np.ndim(T) == 0:
+            return math.sqrt(self.gamma_at(T) * self.R * float(T))
+        return np.sqrt(self.gamma_at(T) * self.R * np.asarray(T, dtype=float))
 
     def temperature_from_enthalpy_array(self, h, guess=None):
         """Vectorised Newton on ``h(T)``, for the solver's per-cell inversion."""
-        import numpy as np
-
         ha = np.asarray(h, dtype=float)
         T = np.full_like(ha, 300.0) if guess is None else np.array(guess, dtype=float)
         for _ in range(80):
