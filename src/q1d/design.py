@@ -276,7 +276,7 @@ def split_equal_work(
     gas: PerfectGas,
     kind: str = "compressor",
 ) -> list[tuple[float, float]]:
-    """Split ONE map point's work across ``n_nodes`` disks, equal Δh₀ each.
+    r"""Split ONE map point's work across ``n_nodes`` disks, equal Δh₀ each.
 
     This is not stage stacking and does not replace it. The two answer different
     questions:

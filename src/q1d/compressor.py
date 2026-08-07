@@ -1485,7 +1485,7 @@ class FlowMatchedCompressor:
 
 @dataclass
 class EcmfCompressor:
-    """Compressor keyed on **exit ECMF**, read one step behind. No β anywhere.
+    r"""Compressor keyed on **exit ECMF**, read one step behind. No β anywhere.
 
     This is the closure the project ended up with, and it is smaller than
     everything it replaces. Each step:

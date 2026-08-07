@@ -1013,7 +1013,7 @@ def load_beta_map(
         # it says the machine beats its own isentropic limit, and multiplied
         # through it would extract more enthalpy than the expansion contains.
         bad = ~((eff > 0.0) & (eff < 1.0))
-        repaired = tuple((int(i), int(j)) for i, j in zip(*np.where(bad)))
+        repaired = tuple((int(i), int(j)) for i, j in zip(*np.where(bad), strict=True))
         for j in range(eff.shape[1]):
             col = bad[:, j]
             if not col.any():

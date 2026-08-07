@@ -17,3 +17,6 @@ prof
 
 # profiler output
 pr
+
+# saved map tables are build artefacts; rebuild or save deliberately
+*.npz

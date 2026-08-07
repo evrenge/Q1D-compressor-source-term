@@ -10,6 +10,10 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "scipy>=1.10", "pandas>=2.0", "openpyxl>=3.1"]
 
 [project.optional-dependencies]
+# Needed only to BUILD a real-gas map (`Nasa9Gas.from_cantera`). Loading a saved
+# map (`ECMFMap.load`) reconstructs the gas from the stored coefficient blocks
+# and needs nothing beyond numpy.
+real = ["cantera>=3.0"]
 plot = ["matplotlib>=3.7"]
 dev = ["pytest>=7.4", "ruff>=0.4"]
 
